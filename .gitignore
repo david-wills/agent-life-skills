@@ -1,0 +1,16 @@
+# Per-machine state and caches never belong in the repo.
+_state/
+logs/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+# Real deployment values live in config.json / *.local.* copies of the shipped examples.
+config.json
+config.local.json
+*.local.md
+*.local.yaml
+*.local.json
+# Browser profiles hold cookies.
+chrome-profile/
+booking-profile/

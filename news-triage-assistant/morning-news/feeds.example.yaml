@@ -1,0 +1,104 @@
+# Feed list — example. Copy to feeds.local.yaml and make it yours.
+#
+# feeds.local.yaml is gitignored; this file is the published template. The two
+# are separate for the same reason profile.local.md is: which outlets you read
+# says something about you, and a repo someone clones should start from a
+# neutral list rather than inherit one.
+#
+# Only free, public RSS endpoints belong here. Nothing in this pipeline
+# authenticates to a publisher, so a subscriber-only feed will simply fail.
+#
+# priority: decides which outlet wins when the same story arrives from several
+# feeds, and the order links are listed on a clustered bullet. First wins. A
+# source missing from this list sorts last rather than erroring.
+#
+# Add your own interests as extra entries — a local paper, a trade publication,
+# a hobby blog. Give each a `source` name, a `section` label, and the feed url:
+#
+#   - source: Your City Times
+#     section: Local
+#     url: https://example.com/local/rss
+#
+# Then add a matching theme to profile.local.md, or the stories will be fetched
+# and dropped for having nowhere to go.
+
+priority:
+- WSJ
+- NYT
+- WaPo
+- The Verge
+- TechCrunch
+- Stratechery
+- OpenAI
+- Google DeepMind
+- Google Research
+feeds:
+- source: WSJ
+  section: Tech
+  url: https://feeds.content.dowjones.io/public/rss/RSSWSJD
+- source: WSJ
+  section: World
+  url: https://feeds.content.dowjones.io/public/rss/RSSWorldNews
+- source: WSJ
+  section: Markets
+  url: https://feeds.content.dowjones.io/public/rss/RSSMarketsMain
+- source: WSJ
+  section: Business
+  url: https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness
+- source: WSJ
+  section: Lifestyle
+  url: https://feeds.content.dowjones.io/public/rss/RSSLifestyle
+- source: WSJ
+  section: Opinion
+  url: https://feeds.content.dowjones.io/public/rss/RSSOpinion
+- source: NYT
+  section: HomePage
+  url: https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml
+- source: NYT
+  section: Technology
+  url: https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml
+- source: NYT
+  section: Business
+  url: https://rss.nytimes.com/services/xml/rss/nyt/Business.xml
+- source: NYT
+  section: Health
+  url: https://rss.nytimes.com/services/xml/rss/nyt/Health.xml
+- source: NYT
+  section: Politics
+  url: https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml
+- source: NYT
+  section: World
+  url: https://rss.nytimes.com/services/xml/rss/nyt/World.xml
+- source: NYT
+  section: Opinion
+  url: https://rss.nytimes.com/services/xml/rss/nyt/Opinion.xml
+- source: WaPo
+  section: Business
+  url: https://feeds.washingtonpost.com/rss/business
+- source: WaPo
+  section: Technology
+  url: https://feeds.washingtonpost.com/rss/business/technology
+- source: WaPo
+  section: National
+  url: https://feeds.washingtonpost.com/rss/national
+- source: WaPo
+  section: World
+  url: https://feeds.washingtonpost.com/rss/world
+- source: The Verge
+  section: All
+  url: https://www.theverge.com/rss/index.xml
+- source: TechCrunch
+  section: All
+  url: https://techcrunch.com/feed/
+- source: Stratechery
+  section: Free
+  url: https://stratechery.com/feed/
+- source: OpenAI
+  section: News
+  url: https://openai.com/news/rss.xml
+- source: Google DeepMind
+  section: Blog
+  url: https://deepmind.google/blog/rss.xml
+- source: Google Research
+  section: Blog
+  url: https://research.google/blog/rss/

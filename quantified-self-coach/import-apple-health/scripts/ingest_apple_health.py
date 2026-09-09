@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Ingest Apple Health daily Markdown files into the FTS index.
+
+Reads the per-day files written by
+``skills/import-apple-health/scripts/parse_hae_payload.py`` under
+``knowledge/apple-health/YYYY-MM-DD.md`` and upserts each into
+``knowledge/index.db`` at id ``apple-health:<YYYY-MM-DD>``, source
+``apple-health``, source_type ``daily``.
+
+Idempotent — re-running for the same dates updates rows in place.
+
+For *structured* value lookup, downstream consumers should read the
+sidecar JSON at ``knowledge/apple-health/.sidecar/<date>.json`` (written
+by the parser) — this ingester only feeds full-text search.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+
+DEFAULT_KB_ROOT = Path.home() / ".openclaw" / "workspace" / "knowledge"
+SOURCE_NAME = "apple-health"
+
+WEEKDAYS = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
+DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
+    id UNINDEXED,
+    source UNINDEXED,
+    source_type UNINDEXED,
+    title,
+    author,
+    url UNINDEXED,
+    readwise_url UNINDEXED,
+    captured_at UNINDEXED,
+    ingested_at UNINDEXED,
+    status UNINDEXED,
+    tags,
+    note,
+    body,
+    path UNINDEXED,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+"""
+
+
+def _iso_utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _ensure_db(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(FTS_SCHEMA)
+    return conn
+
+
+def _upsert(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute("DELETE FROM entries WHERE id = ?", (row["id"],))
+    conn.execute(
+        """
+        INSERT INTO entries
+            (id, source, source_type, title, author, url, readwise_url,
+             captured_at, ingested_at, status, tags, note, body, path)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            row["id"],
+            row["source"],
+            row["source_type"],
+            row["title"] or "",
+            row["author"] or "",
+            row["url"] or "",
+            row["readwise_url"] or "",
+            row["captured_at"] or "",
+            row["ingested_at"],
+            row["status"],
+            " ".join(row["tags"]),
+            row["note"] or "",
+            row["body"] or "",
+            str(row["path"]),
+        ),
+    )
+
+
+def _split_frontmatter(text: str) -> tuple[str, str]:
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
+    if not m:
+        return "", text
+    return m.group(1), m.group(2).lstrip()
+
+
+def _date_from_filename(path: Path) -> dt.date | None:
+    m = DATE_RE.match(path.stem)
+    if not m:
+        return None
+    try:
+        return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def ingest_files(
+    kb_root: Path,
+    since: dt.date | None = None,
+    only: list[str] | None = None,
+    default_status: str = "confirmed",
+) -> tuple[int, int]:
+    src_dir = kb_root / "apple-health"
+    if not src_dir.is_dir():
+        return 0, 0
+
+    only_set = set(only) if only else None
+    candidates: list[tuple[dt.date, Path]] = []
+    for f in src_dir.glob("*.md"):
+        d = _date_from_filename(f)
+        if d is None:
+            continue
+        if since and d < since:
+            continue
+        if only_set and f.stem not in only_set:
+            continue
+        candidates.append((d, f))
+    candidates.sort()
+
+    conn = _ensure_db(kb_root / "index.db")
+    ingested_at = _iso_utc_now()
+    written = 0
+    skipped = 0
+
+    try:
+        for d, f in candidates:
+            try:
+                text = f.read_text(encoding="utf-8")
+            except OSError:
+                skipped += 1
+                continue
+            _, body = _split_frontmatter(text)
+            if not body.strip():
+                skipped += 1
+                continue
+            date_str = d.isoformat()
+            weekday = WEEKDAYS[d.weekday()]
+            title = f"Apple Health — {date_str} ({weekday})"
+            captured_at = f"{date_str}T12:00:00-07:00"
+
+            row = {
+                "id": f"{SOURCE_NAME}:{date_str}",
+                "source": SOURCE_NAME,
+                "source_type": "daily",
+                "title": title,
+                "author": "",
+                "url": "",
+                "readwise_url": "",
+                "captured_at": captured_at,
+                "ingested_at": ingested_at,
+                "status": default_status,
+                "tags": [],
+                "note": "",
+                "body": body,
+                "path": f,
+            }
+            _upsert(conn, row)
+            written += 1
+        conn.commit()
+    finally:
+        conn.close()
+
+    return written, skipped
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--kb-root", default=str(DEFAULT_KB_ROOT))
+    p.add_argument(
+        "--since", help="Only process dates on or after YYYY-MM-DD."
+    )
+    p.add_argument(
+        "--days",
+        type=int,
+        help="Only process the last N days (overrides --since).",
+    )
+    p.add_argument(
+        "--date",
+        action="append",
+        default=[],
+        help="Process only this date (YYYY-MM-DD). May be repeated.",
+    )
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="Process every file in knowledge/apple-health/ (backfill mode).",
+    )
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    kb_root = Path(args.kb_root).expanduser()
+    since: dt.date | None = None
+
+    if args.days is not None:
+        since = dt.date.today() - dt.timedelta(days=args.days)
+    elif args.since:
+        try:
+            since = dt.date.fromisoformat(args.since)
+        except ValueError:
+            print(
+                f"--since must be YYYY-MM-DD, got {args.since!r}", file=sys.stderr
+            )
+            return 2
+    elif not args.all and not args.date:
+        # Default for cron use: last 7 days.
+        since = dt.date.today() - dt.timedelta(days=7)
+
+    only = args.date or None
+    written, skipped = ingest_files(kb_root, since=since, only=only)
+    print(
+        f"apple-health: ingested={written} skipped={skipped} kb_root={kb_root}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

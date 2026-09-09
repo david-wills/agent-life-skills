@@ -1,0 +1,5 @@
+# macOS only: on-device OCR and face detection through Apple's Vision framework.
+# ffmpeg must also be on PATH (brew install ffmpeg).
+pyobjc-framework-Vision>=10.0
+pyobjc-framework-Quartz>=10.0
+pyobjc-framework-Cocoa>=10.0
