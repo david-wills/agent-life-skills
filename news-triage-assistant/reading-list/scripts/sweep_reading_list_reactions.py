@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply the user's Discord reactions on #reading-list posts to Readwise Reader.
 
-Runs daily at 00:01 PT. For every article card still in `posted` state, read
+Meant to run nightly. For every article card still in `posted` state, read
 its reactions and drive Reader accordingly:
 
     ✅  → PATCH /v3/update/<id>/ {"location": "archive"}
@@ -9,8 +9,10 @@ its reactions and drive Reader accordingly:
     🗑️  → DELETE /v3/delete/<id>/
 
 Cards with no reaction stay pending until they age out (14 days). Cards with
-two conflicting reactions are left alone and reported — guessing between
-"archive" and "delete" is not a call this script gets to make.
+two conflicting reactions are left alone and reported: guessing between
+"archive" and "delete" is not a call this script gets to make. A card whose
+reactions cannot be read (deleted message, expired token) is an error, never
+"no reaction".
 
 Exit 0 with a JSON status line on stdout.
 """
@@ -19,16 +21,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path
 from typing import Any
 
-import reading_list_common as rl
-import sys  # noqa: E402
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2).
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-import socratic_common as sc
+import reading_list_common as rl  # noqa: E402
+from discord import DiscordError, fetch_message_reactions, send_message  # noqa: E402
+from state_db import connect_db  # noqa: E402
 
 ACTION_LABEL = {
     "archive": "archived",
@@ -41,15 +46,21 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Apply #reading-list reactions to Readwise Reader.")
     p.add_argument("--dry-run", action="store_true", help="Report intended actions; change nothing.")
     p.add_argument("--quiet", action="store_true", help="Never post the recap message to Discord.")
+    p.add_argument("--db", default=None,
+                   help="SQLite file holding reading_list_log (default: <data_root>/knowledge/index.db).")
     p.add_argument("--expiry-days", type=int, default=rl.REACTION_EXPIRY_DAYS,
-                   help="Stop sweeping unreacted cards after this many days.")
+                   help=f"Stop sweeping unreacted cards after this many days (default {rl.REACTION_EXPIRY_DAYS}).")
     return p.parse_args()
 
 
 def user_actions(channel: str, message_id: str, token: str) -> list[str]:
-    """Distinct actions the user reacted with, de-duplicated and order-stable."""
+    """Distinct actions the user reacted with, de-duplicated and order-stable.
+
+    Raises DiscordError if the message cannot be read; the caller records that
+    against the card rather than treating it as a quiet night.
+    """
     found: list[str] = []
-    for reaction in sc.fetch_message_reactions(channel, message_id, token=token):
+    for reaction in fetch_message_reactions(channel, message_id, token=token):
         if not reaction.get("by_user"):
             continue
         action = rl.ACTION_EMOJI.get(rl.strip_vs(reaction.get("name") or ""))
@@ -72,7 +83,8 @@ def main() -> int:
     args = parse_args()
     now = rl.utc_now()
 
-    conn = sc.connect_db(sc.MASTERCLAW_KB_DB)
+    db = Path(args.db).expanduser() if args.db else rl.db_path()
+    conn = connect_db(db)
     rl.ensure_tables(conn)
 
     rows = conn.execute(
@@ -84,8 +96,10 @@ def main() -> int:
         print(json.dumps({"status": "nothing_pending", "checked": 0}))
         return 0
 
-    reader = rl.reader_token()
-    discord = sc.get_discord_token()
+    # Reading reactions always needs Discord. Reader is only touched when an
+    # action is actually applied, so a dry run never resolves that token.
+    discord = rl.discord_token()
+    reader = None if args.dry_run else rl.reader_token()
 
     counts = {"archive": 0, "later": 0, "delete": 0}
     conflicts: list[str] = []
@@ -99,6 +113,9 @@ def main() -> int:
         title = row["title"] or doc_id
         try:
             actions = user_actions(row["channel"], row["message_id"], discord)
+        except DiscordError as exc:
+            errors.append(f"{doc_id}: reaction read failed ({title[:60]}): {exc}")
+            continue
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{doc_id}: reaction read {type(exc).__name__}: {exc}")
             continue
@@ -129,7 +146,7 @@ def main() -> int:
 
         ok, detail = apply_action(doc_id, action, reader)
         if not ok:
-            errors.append(f"{doc_id}: {action} failed — {detail}")
+            errors.append(f"{doc_id}: {action} failed: {detail}")
             continue
 
         conn.execute(
@@ -142,23 +159,21 @@ def main() -> int:
         applied.append({"doc_id": doc_id, "title": title, "action": action, "detail": detail})
 
     total = sum(counts.values())
-    if (total or conflicts) and not args.quiet and not args.dry_run:
+    if (total or conflicts or errors) and not args.quiet and not args.dry_run:
         parts = [f"{counts[a]} {ACTION_LABEL[a]}" for a in ("archive", "later", "delete") if counts[a]]
-        lines = ["🧹 **Reading list swept** — " + (", ".join(parts) if parts else "no actions")]
+        lines = ["🧹 **Reading list swept**: " + (", ".join(parts) if parts else "no actions")]
         for item in applied:
             if item["action"] == "delete":
                 lines.append(f"-# 🗑️ deleted: {item['title'][:120]}")
         if conflicts:
             lines.append("")
-            lines.append("⚠️ Conflicting reactions — left pending, pick one:")
+            lines.append("⚠️ Conflicting reactions, left pending, pick one:")
             lines.extend(f"-# • {c}" for c in conflicts)
+        if errors:
+            lines.append("")
+            lines.append(f"❌ {len(errors)} card(s) could not be swept; see the run output.")
         try:
-            sc.discord_request(
-                "POST",
-                f"/channels/{channel_for_recap}/messages",
-                {"content": "\n".join(lines)[:1990], "flags": 4, "allowed_mentions": {"parse": []}},
-                token=discord,
-            )
+            send_message(channel_for_recap, "\n".join(lines)[:1990], token=discord)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"recap post: {type(exc).__name__}: {exc}")
 

@@ -26,25 +26,23 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2). Walk up to find it
-# rather than hardcoding a path: skills are reached through a symlink.
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-import socratic_common as sc  # noqa: E402
+from discord import add_reaction, get_discord_token, strip_variation_selectors  # noqa: E402
 from read_secret import read_secret  # noqa: E402
-from skill_config import cfg  # noqa: E402
+from skill_config import cfg, data_root  # noqa: E402
+from state_db import ensure_state_table  # noqa: E402
 
 READER_LIST_URL = "https://readwise.io/api/v3/list/"
 READER_UPDATE_URL = "https://readwise.io/api/v3/update/{doc_id}/"
 READER_DELETE_URL = "https://readwise.io/api/v3/delete/{doc_id}/"
 PAGE_SLEEP_SECONDS = 0.25
 
-# Lazy — see __getattr__ at the bottom. Eager resolution here would make a missing
-# key an import-time failure for every module that imports this one.
-
-# Categories worth a prose summary. Tweets/videos/notes/highlights are skipped —
+# Categories worth a prose summary. Tweets/videos/notes/highlights are skipped:
 # there is nothing to compress and the model just paraphrases the title.
 SUMMARIZABLE_CATEGORIES = {"article", "email", "pdf", "epub", "rss"}
 
@@ -65,6 +63,30 @@ THIN_TEXT_CHARS = 1200
 REACTION_EXPIRY_DAYS = 14
 
 WATERMARK_KEY = "reading_list_watermark"
+
+
+# ---------- config-backed values (call from main(), never at import) --------
+
+
+def db_path() -> Path:
+    """The SQLite file this skill keeps its log and watermark in.
+
+    Shared with the two importers' ingesters, which write the full-text index
+    to the same file: <data_root>/knowledge/index.db.
+    """
+    return data_root() / "knowledge" / "index.db"
+
+
+def reading_list_channel() -> str:
+    return cfg("discord.channels.reading_list")
+
+
+def reader_token() -> str:
+    return read_secret("readwise")
+
+
+def discord_token() -> str:
+    return get_discord_token()
 
 
 # ---------- time helpers --------------------------------------------------
@@ -90,7 +112,7 @@ def parse_iso(value: str) -> dt.datetime:
 
 def strip_vs(emoji: str) -> str:
     """Drop variation selectors so 🗑️ and 🗑 compare equal."""
-    return (emoji or "").replace("️", "").replace("︎", "")
+    return strip_variation_selectors(emoji)
 
 
 # ---------- state ---------------------------------------------------------
@@ -101,6 +123,8 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
 
     status: posted -> actioned | expired
     action: archive | later | delete (null until swept)
+
+    Also creates the shared `skill_state` key/value table the watermark lives in.
     """
     conn.execute(
         """
@@ -125,6 +149,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reading_list_status ON reading_list_log(status)"
     )
+    ensure_state_table(conn)
     conn.commit()
 
 
@@ -138,11 +163,7 @@ def already_posted(conn: sqlite3.Connection, doc_id: str) -> bool:
 # ---------- Reader API ----------------------------------------------------
 
 
-def reader_token() -> str:
-    return read_secret("readwise")
-
-
-# Reader throttles the list endpoint, and it tells you for how long — in the
+# Reader throttles the list endpoint, and it tells you for how long: in the
 # `Retry-After` header, and failing that in the error body ("available in 41
 # seconds"). Backfill made this script chattier (a full catalog scan plus a fetch
 # per pick), so a 429 has to be waited out rather than surfaced as a run failure.
@@ -197,10 +218,16 @@ def fetch_inbox(token: str, updated_after: str | None, with_html: bool = True) -
     return docs
 
 
-def fetch_document(token: str, doc_id: str, with_html: bool = True) -> dict[str, Any] | None:
+def fetch_document(token: str, doc_id: str, with_html: bool = True,
+                   location: str | None = None) -> dict[str, Any] | None:
     """One document by id. Lets a caller scan the catalog cheaply (metadata only) and
-    pay for `html_content` just on the handful it actually intends to summarize."""
+    pay for `html_content` just on the handful it actually intends to summarize.
+
+    `location` narrows the lookup to one Reader location (new, later, archive...).
+    """
     params: dict[str, str] = {"id": doc_id}
+    if location:
+        params["location"] = location
     if with_html:
         params["withHtmlContent"] = "true"
     results = _reader_get(token, params).get("results", [])
@@ -251,33 +278,10 @@ def reader_delete(doc_id: str, token: str) -> tuple[bool, str]:
 
 def add_affordances(channel: str, message_id: str, token: str | None = None) -> None:
     """Seed ✅ 📌 🗑️ on a post so the user just clicks instead of typing an emoji."""
-    token = token or sc.get_discord_token()
+    token = token or get_discord_token()
     for emoji in AFFORDANCE_EMOJI:
-        path = (
-            f"/channels/{channel}/messages/{message_id}"
-            f"/reactions/{urllib.parse.quote(emoji)}/@me"
-        )
         try:
-            sc.discord_request("PUT", path, token=token)
+            add_reaction(channel, message_id, emoji, token=token)
         except Exception:  # noqa: BLE001 - affordances are cosmetic, never fatal
             pass
         time.sleep(0.3)
-
-
-# ---------- Lazy config-backed module attributes -------------------------
-# PEP 562: `rl.READING_LIST_CHANNEL` resolves on first access, not at import.
-# Inside this file use cfg("discord.channels.reading_list") directly.
-
-_CONFIG_ATTRS = {"READING_LIST_CHANNEL": "discord.channels.reading_list"}
-
-
-def __getattr__(name: str):
-    key = _CONFIG_ATTRS.get(name)
-    if key is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return cfg(key)
-
-
-def __dir__() -> list[str]:
-    return sorted(list(globals()) + list(_CONFIG_ATTRS))
-

@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Google Calendar reads for the restaurant skills.
+"""Calendar reads for the restaurant assistant.
 
-Reads the shared household calendar (calendars.shared) through gog. Read-only by design:
-nothing here writes to the calendar.
+Reads the shared household calendar (``calendars.shared``) through the ``gog``
+CLI, authenticated as ``accounts.service``. Read-only by design: nothing here
+writes to the calendar. Any calendar CLI that prints events as JSON will do;
+``fetch_events`` is the only function that knows about ``gog``.
+
+Timezones: ``gog`` prints RFC 3339 timestamps with an offset. Every timestamp
+is converted to this machine's local zone first and only then made naive, so
+the dinner window is compared in local time. A timestamp with no offset is
+assumed to already be local.
 """
 from __future__ import annotations
 
@@ -27,16 +34,27 @@ RESERVATION_RE = re.compile(
 
 
 def fetch_events(start: dt.date, end: dt.date) -> list[dict]:
-    """Events between start and end (inclusive-ish), via gog."""
+    """Events between start and end (inclusive-ish), via gog.
+
+    Raises RuntimeError("gog_failed: ...") when the binary is missing or exits
+    non-zero. Swap this function for your own calendar client if you do not
+    use gog.
+    """
     cmd = [
         "gog", "calendar", "events",
-        "-a", rc.GOG_ACCOUNT,
-        "--calendars", rc.CALENDAR_ID,
+        "-a", rc.cfg("accounts.service"),
+        "--calendars", rc.cfg("calendars.shared"),
         "--from", start.isoformat(),
         "--to", end.isoformat(),
         "--json", "--results-only",
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "gog_failed: `gog` not found on PATH; install gog or swap calendar_lib.py "
+            "for your own calendar CLI"
+        ) from None
     if r.returncode != 0:
         raise RuntimeError(f"gog_failed: {r.stderr.strip()[:300]}")
     try:
@@ -45,12 +63,19 @@ def fetch_events(start: dt.date, end: dt.date) -> list[dict]:
         return []
 
 
+def _local_naive(d: dt.datetime) -> dt.datetime:
+    """Convert to local time, then drop tzinfo. Naive input is assumed local."""
+    if d.tzinfo is not None:
+        d = d.astimezone()
+    return d.replace(tzinfo=None)
+
+
 def _parse(node: dict) -> tuple[dt.datetime | None, bool]:
-    """Return (local datetime, is_all_day) for a start/end node."""
+    """Return (local naive datetime, is_all_day) for a start/end node."""
     if not node:
         return None, False
     if node.get("dateTime"):
-        return dt.datetime.fromisoformat(node["dateTime"]), False
+        return _local_naive(dt.datetime.fromisoformat(node["dateTime"])), False
     if node.get("date"):
         return dt.datetime.fromisoformat(node["date"] + "T00:00:00"), True
     return None, False
@@ -75,14 +100,16 @@ def blockers_for(events: list[dict], day: dt.date) -> list[str]:
             if start.date() <= day < end_day or start.date() == day:
                 out.append(f"{summary} (all day)")
             continue
-        if start.date() != day and (end is None or end.date() != day):
-            continue
-        s = start.replace(tzinfo=None)
-        e = (end or start).replace(tzinfo=None)
+        s = start
+        e = end or start
         if e <= s:
             e = s + dt.timedelta(minutes=30)
+        # Plain interval overlap, so a timed event that starts before the day
+        # and ends after it (a trip, an overnight shift) blocks it too.
         if s < win_end and e > win_start:
-            out.append(f"{summary} ({s.strftime('%-I:%M%p').lower()})")
+            when = (f"until {e.strftime('%a %-I:%M%p').lower()}" if s.date() < day
+                    else s.strftime("%-I:%M%p").lower())
+            out.append(f"{summary} ({when})")
     return out
 
 
@@ -105,7 +132,7 @@ def reservation_detail(events: list[dict], day: dt.date) -> dict | None:
             return {
                 "name": m.group(1).strip(),
                 "time": None if all_day else start.strftime("%-I:%M%p").lower(),
-                "starts_at": start.isoformat(),
+                "starts_at": start.astimezone().isoformat(timespec="minutes"),
             }
     return None
 

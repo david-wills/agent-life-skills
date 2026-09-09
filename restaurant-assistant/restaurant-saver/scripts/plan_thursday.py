@@ -3,24 +3,29 @@
 
 A data shovel. It does not choose — it hands the agent a scored shortlist and
 the agent writes the copy and calls post_suggestions.py.
+
+Only ``want_to_go`` places are candidates, so ``been``, ``favorite`` and
+``archived`` never show up. Rows whose name is a bare coordinate pair (a
+dropped map pin that was never a restaurant) are set to ``archived`` on the
+way past — never deleted.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import re  # noqa: E402
-
 import restaurant_common as rc  # noqa: E402
 from calendar_lib import free_thursdays  # noqa: E402
 
-# Categories that are on the Maps list but are not dinner-out candidates.
-NON_DINNER = ("hang gliding", "flight school", "museum", "gym", "hotel")
-# Dropped map pins land in the list as "34.110890, -118.41541" with cuisine "Note".
+# Things that end up on a saved-places list but are not dinner-out candidates.
+# Matched against "name cuisine", lowercased; tune to your own list.
+NON_DINNER = ("cooking class", "wine bar", "bakery", "hotel", "museum")
+# Dropped map pins land in the list with a name like "12.345678, -98.765432".
 COORD_NAME = re.compile(r"^-?\d{1,3}\.\d+,\s*-?\d{1,3}\.\d+$")
 
 
@@ -58,10 +63,11 @@ def candidates(conn, limit: int) -> list[dict]:
     ).fetchall()
     scored = []
     for r in rows:
+        if COORD_NAME.match(r["name"] or ""):
+            rc.set_status(conn, r["id"], rc.STATUS_ARCHIVED)
+            continue
         blob = f"{r['name']} {r['cuisine'] or ''}".lower()
         if any(k in blob for k in NON_DINNER):
-            continue
-        if COORD_NAME.match(r['name'] or '') or (r['cuisine'] or '') == 'Note':
             continue
         scored.append((score(r, recent), r))
     scored.sort(key=lambda t: -t[0])
@@ -89,9 +95,9 @@ def candidates(conn, limit: int) -> list[dict]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--weeks", type=int, default=4)
-    ap.add_argument("--limit", type=int, default=8)
+    ap = argparse.ArgumentParser(description="Free Thursdays on the shared calendar plus a scored shortlist.")
+    ap.add_argument("--weeks", type=int, default=4, help="How many Thursdays ahead to check")
+    ap.add_argument("--limit", type=int, default=8, help="Shortlist size")
     args = ap.parse_args()
 
     conn = rc.connect()

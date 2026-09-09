@@ -1,34 +1,52 @@
 """Shared config, pricing and DB helpers for the token tracker."""
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2). Walk up to find it
-# rather than hardcoding a path: skills are reached through a symlink.
-_LIB = next(p / "lib" for p in Path(__file__).resolve().parents
-            if (p / "lib" / "skill_config.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-from skill_config import cfg  # noqa: E402
+from skill_config import cfg, data_root  # noqa: E402
 
-# CONVENTIONS.md 1: mutable state lives in <skill>/_state/, never tracked.
-# .resolve() matters -- this skill is reached through the workspace symlink, and
-# without it _state/ would land beside the symlink instead of in the repo.
-SKILL_DIR = Path(__file__).resolve().parent.parent
-STATE = SKILL_DIR / "_state"
-DB_PATH = str(STATE / "tokens.db")
 
-# The workspace is anchored absolutely, never derived from __file__ (CONVENTIONS.md 4).
-WORKSPACE = Path.home() / ".openclaw" / "workspace"
+def db_path():
+    """The durable archive: <data_root>/token-tracker/tokens.db (gitignored)."""
+    return str(data_root() / "token-tracker" / "tokens.db")
+
+# Claude Code's transcript root. Every assistant turn in here carries a usage block.
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
-OPENCLAW_STATE_DB = os.path.expanduser("~/.openclaw/state/openclaw.sqlite")
-OPENCLAW_AGENTS = os.path.expanduser("~/.openclaw/agents")
 
-# Discord channel for all token-tracker output
-DISCORD_CHANNEL = str(cfg("discord.channels.token_tracker"))
+
+def openclaw_paths():
+    """Where the OpenClaw agent gateway keeps its own state, if it is installed.
+
+    The tracker reads these only for attribution (which cron job or chat channel
+    caused a session). Every reader tolerates their absence: without OpenClaw,
+    sessions simply resolve to terminal:<project> or unattributed.
+    """
+    home = Path.home() / ".openclaw"
+    return {
+        "state_db": str(home / "state" / "openclaw.sqlite"),   # cron_run_logs, cron_jobs
+        "agents": str(home / "agents"),                        # <agent>/sessions/sessions.json
+    }
+
+
+def discord_channel():
+    """Channel id every token-tracker post goes to. Read lazily so --help needs no config."""
+    return str(cfg("discord.channels.token_tracker"))
+
+
+def local_host():
+    """Label for this machine's rows. Config `token_tracker.host`, else the short hostname."""
+    return str(cfg("token_tracker.host", socket.gethostname().split(".")[0]))
+
 
 # Anthropic first-party API list prices, $ per 1M tokens (input, output).
 # Cache write 5m = 1.25x input, cache write 1h = 2x input, cache read = 0.1x input.
@@ -55,9 +73,6 @@ CACHE_READ_MULT = 0.1
 CACHE_READ_FLAT = {
     "claude-fable-5-1": 0.25,
 }
-
-# Hosts whose transcripts feed this database. 'mini' is where the tracker runs.
-LOCAL_HOST = "mini"
 
 
 # Rollout files record a model id but no provider, and locally-served models
@@ -122,16 +137,34 @@ def cost_usd(model, inp, out, cache_read, cw5m, cw1h):
     ) / 1_000_000.0
 
 
+OAUTH_MISSING = ("no Claude Code OAuth login found in the keychain; quota sampling needs a "
+                 "subscription login, not an API key")
+
+
 def oauth_token() -> str:
-    """Read the live Claude Code OAuth access token from the macOS keychain."""
-    raw = subprocess.run(
-        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-        capture_output=True, text=True, timeout=20,
-    ).stdout
-    return json.loads(raw)["claudeAiOauth"]["accessToken"]
+    """Read the live Claude Code OAuth access token from the macOS keychain.
+
+    Raises RuntimeError with one clear line when there is no subscription login
+    to read: API-key users get token counts and costs but no quota percentage.
+    """
+    try:
+        raw = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(OAUTH_MISSING) from exc
+    try:
+        token = json.loads(raw)["claudeAiOauth"]["accessToken"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(OAUTH_MISSING) from exc
+    if not token:
+        raise RuntimeError(OAUTH_MISSING)
+    return token
 
 
-def connect(path=DB_PATH):
+def connect(path=None):
+    path = path or db_path()
     parent = os.path.dirname(path)
     if parent:                      # ":memory:" and bare filenames have none
         os.makedirs(parent, exist_ok=True)
@@ -140,6 +173,8 @@ def connect(path=DB_PATH):
     return con
 
 
+# `host` has no meaningful default: every INSERT passes lib.local_host() or the
+# host named in an import, and a blank would only hide a caller that forgot.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
   uuid            TEXT PRIMARY KEY,
@@ -148,7 +183,7 @@ CREATE TABLE IF NOT EXISTS messages (
   ts              INTEGER NOT NULL,          -- epoch ms, UTC
   day             TEXT NOT NULL,             -- YYYY-MM-DD, America/Los_Angeles
   model           TEXT,
-  entrypoint      TEXT,                      -- 'sdk-cli' (OpenClaw) | 'cli' (terminal)
+  entrypoint      TEXT,                      -- 'sdk-cli' (an agent harness) | 'cli' (terminal)
   is_sidechain    INTEGER DEFAULT 0,
   input_tokens    INTEGER DEFAULT 0,
   output_tokens   INTEGER DEFAULT 0,
@@ -157,7 +192,7 @@ CREATE TABLE IF NOT EXISTS messages (
   cache_write_1h  INTEGER DEFAULT 0,
   thinking_tokens INTEGER DEFAULT 0,
   cost_usd        REAL DEFAULT 0,
-  host            TEXT NOT NULL DEFAULT 'mini',
+  host            TEXT NOT NULL,
   provider        TEXT NOT NULL DEFAULT 'anthropic',
   request_id      TEXT
 );
@@ -177,7 +212,7 @@ CREATE TABLE IF NOT EXISTS files (
 -- one row per claude-cli session, mapping it to the workflow that caused it
 CREATE TABLE IF NOT EXISTS attribution (
   session_id  TEXT PRIMARY KEY,
-  host        TEXT DEFAULT 'mini',
+  host        TEXT NOT NULL,
   kind        TEXT,      -- cron | channel | terminal | unattributed
   label       TEXT,      -- human name: "newsfeed", "discord:#coach", "terminal:workspace"
   agent       TEXT,      -- agent id, e.g. main | work
@@ -212,12 +247,14 @@ CREATE TABLE IF NOT EXISTS quota_samples (
 def init(con):
     # Migrate first: SCHEMA creates an index over messages(host, ...), which fails
     # on a pre-multi-host database if the column isn't added before the script runs.
+    # SQLite cannot ALTER TABLE ADD a NOT NULL column without a default, so the
+    # migration for `host` backfills old rows with '' (they predate host labels).
     existing = {r[0] for r in con.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    for table, col, decl in (("messages", "host", "TEXT NOT NULL DEFAULT 'mini'"),
+    for table, col, decl in (("messages", "host", "TEXT NOT NULL DEFAULT ''"),
                              ("messages", "provider", "TEXT NOT NULL DEFAULT 'anthropic'"),
                              ("messages", "request_id", "TEXT"),
-                             ("attribution", "host", "TEXT DEFAULT 'mini'"),
+                             ("attribution", "host", "TEXT NOT NULL DEFAULT ''"),
                              ("quota_samples", "provider", "TEXT DEFAULT 'anthropic'")):
         if table not in existing:
             continue

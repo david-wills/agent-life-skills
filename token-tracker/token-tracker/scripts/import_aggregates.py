@@ -10,6 +10,10 @@ Known limitation: an aggregate host is day-granular. Its rows are timestamped at
 noon PT, so a quota window that starts or ends mid-day attributes that whole day
 to one side. Fine for daily and weekly reporting; not usable for the 5-hour drift
 regression, which stays on fine-grained local data.
+
+Usage:
+  import_aggregates.py path/to/export.json   # import one file
+  import_aggregates.py --watch               # import anything new in token_tracker.inbox
 """
 import argparse
 import glob
@@ -30,7 +34,7 @@ def import_doc(con, doc, verbose=True):
     if doc.get("schema") not in (1, 2):
         raise SystemExit(f"unsupported export schema: {doc.get('schema')!r}")
     host = doc["host"]
-    if host == lib.LOCAL_HOST:
+    if host == lib.local_host():
         raise SystemExit(f"refusing to import: host {host!r} is the local machine, "
                          f"whose transcripts are already read directly")
     # A snapshot replaces that host entirely -- otherwise rows whose provider or
@@ -91,13 +95,14 @@ def import_doc(con, doc, verbose=True):
 
 
 def watch(con, folder=None, verbose=True):
-    """Import any counts-only export dropped into the shared inbox.
+    """Import any counts-only export dropped into the inbox folder.
 
-    The other machine writes to a folder on its own disk that this one already
-    mounts, so nothing needs SSH, a key, or shell access in either direction.
-    A missing mount (machine asleep or off) is a silent skip, not an error.
+    The inbox is any folder both machines can reach -- a synced drive, a network
+    share, a shared mount -- so nothing needs SSH, a key, or shell access in
+    either direction. A missing folder (unmounted, machine off) is a silent skip.
     """
     folder = folder or lib.cfg("token_tracker.inbox", None)
+    folder = os.path.expanduser(folder) if folder else None
     if not folder or not os.path.isdir(folder):
         return 0
     seen = {r[0]: (r[1], r[2]) for r in con.execute("SELECT path,size,mtime FROM files")}
@@ -130,10 +135,11 @@ def watch(con, folder=None, verbose=True):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Import a counts-only export from another machine.")
     ap.add_argument("path", nargs="?", help="JSON file from export_aggregates.py")
     ap.add_argument("--watch", action="store_true",
-                    help="import everything new in token_tracker.inbox")
+                    help="import everything new in the token_tracker.inbox folder "
+                         "(also the default when no path is given)")
     a = ap.parse_args()
     con = lib.connect()
     lib.init(con)

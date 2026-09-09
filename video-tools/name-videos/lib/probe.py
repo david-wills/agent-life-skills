@@ -3,25 +3,44 @@
 
 Everything here runs on-device (ffmpeg + Apple Vision). No network, no tokens.
 Emits JSON on stdout; writes first-clip JPEGs into --outdir.
+
+Usage:
+  probe.py --outdir <scratch>/clips "<file>" ["<file>" ...]
+  probe.py --outdir <scratch>/clips --from-file paths.txt     # one path per line
+
+Needs ffmpeg on PATH and the pyobjc Vision/Quartz frameworks (requirements.txt);
+both are checked when a video is probed, not at import, so --help works anywhere.
 """
 import sys, os, re, json, argparse, subprocess, tempfile, shutil, difflib
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hint import filename_hint
-import Vision, Quartz
-from Foundation import NSURL
 
 SECS, FPS, OCR_W, CLIP_W = 20, 1, 720, 480
+CLIP_SECS = 6            # stills for the first-clip frame; the third one (~3s) is kept
+
+def _frameworks():
+    """Import the Apple frameworks lazily: macOS-only and only needed to probe."""
+    try:
+        import Vision, Quartz
+        from Foundation import NSURL
+    except ImportError as e:
+        raise SystemExit("probe.py needs the pyobjc Vision/Quartz frameworks: "
+                         "pip install -r requirements.txt (macOS only)") from e
+    return Vision, Quartz, NSURL
 
 def _cg(path):
+    _, Quartz, NSURL = _frameworks()
     src = Quartz.CGImageSourceCreateWithURL(NSURL.fileURLWithPath_(path), None)
     return Quartz.CGImageSourceCreateImageAtIndex(src, 0, None) if src else None
 
 def _run(req, img):
+    Vision, _, _ = _frameworks()
     Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(
         img, None).performRequests_error_([req], None)
 
 def ocr(path):
+    Vision, _, _ = _frameworks()
     img = _cg(path)
     if img is None: return []
     out = []
@@ -35,6 +54,7 @@ def ocr(path):
     return out
 
 def faces(path):
+    Vision, _, _ = _frameworks()
     img = _cg(path)
     if img is None: return []
     out = []
@@ -47,11 +67,19 @@ def faces(path):
     _run(Vision.VNDetectFaceRectanglesRequest.alloc().initWithCompletionHandler_(h), img)
     return out
 
-def _ffmpeg(video, tmp, secs, width, fps):
-    subprocess.run(["ffmpeg","-nostdin","-v","error","-ss","0","-t",str(secs),
-                    "-i",video,"-vf",f"fps={fps},scale={width}:-2","-q:v","3",
-                    os.path.join(tmp,"%03d.jpg"),"-y"], check=False)
-    return sorted(os.path.join(tmp,f) for f in os.listdir(tmp) if f.endswith(".jpg"))
+def require_ffmpeg():
+    if not shutil.which("ffmpeg"):
+        raise SystemExit("ffmpeg not found on PATH (brew install ffmpeg)")
+
+def _frames(video, tmp):
+    """One decode, two outputs: OCR frames at 720px for SECS, clip stills at 480px for CLIP_SECS."""
+    subprocess.run(["ffmpeg","-nostdin","-v","error","-y","-ss","0","-t",str(SECS),"-i",video,
+                    "-vf",f"fps={FPS},scale={OCR_W}:-2","-q:v","3",os.path.join(tmp,"ocr_%03d.jpg"),
+                    "-t",str(CLIP_SECS),"-vf",f"fps=1,scale={CLIP_W}:-2","-q:v","3",
+                    os.path.join(tmp,"clip_%03d.jpg")], check=False)
+    names = sorted(os.listdir(tmp))
+    return ([os.path.join(tmp,f) for f in names if f.startswith("ocr_")],
+            [os.path.join(tmp,f) for f in names if f.startswith("clip_")])
 
 def norm(s): return re.sub(r'[^a-z0-9 ]','',s.lower()).strip()
 WATERMARK = "yourbrand"   # the channel watermark OCR reads off every frame; never a title
@@ -114,25 +142,20 @@ def talking_head(face_frames):
             "verdict": v}
 
 def probe(video, outdir):
-    tmp = tempfile.mkdtemp()
-    try:
-        fs = _ffmpeg(video, tmp, SECS, OCR_W, FPS)
-        per_ocr  = [ocr(f) for f in fs]
-        per_face = [faces(f) for f in fs]
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
+    require_ffmpeg()
     stem = re.sub(r'[^A-Za-z0-9]+','_', os.path.splitext(os.path.basename(video))[0])[:60]
     clip = None
-    tmp2 = tempfile.mkdtemp()
+    tmp = tempfile.mkdtemp()
     try:
-        cf = _ffmpeg(video, tmp2, 6, CLIP_W, 1)   # first-clip stills, 480px
+        fs, cf = _frames(video, tmp)
+        per_ocr  = [ocr(f) for f in fs]
+        per_face = [faces(f) for f in fs]
         if len(cf) >= 3:
             os.makedirs(outdir, exist_ok=True)
             clip = os.path.join(outdir, f"{stem}__clip.jpg")
             shutil.copy(cf[2], clip)              # ~3s in, past the cold open
     finally:
-        shutil.rmtree(tmp2, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
 
     return {"path": video, "filename": os.path.basename(video),
             "filename_hint": filename_hint(os.path.basename(video)),
@@ -141,13 +164,21 @@ def probe(video, outdir):
             "talking_head": talking_head(per_face),
             "clip_frame": clip}
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("videos", nargs="*")
-    ap.add_argument("--from-file", help="newline-delimited list of video paths")
-    ap.add_argument("--outdir", required=True)
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("videos", nargs="*", help="video files to probe; several per call is faster")
+    ap.add_argument("--from-file", help="newline-delimited list of video paths, added to the positionals")
+    ap.add_argument("--outdir", required=True, help="where the first-clip stills are written")
     a = ap.parse_args()
     vids = list(a.videos)
     if a.from_file:
-        vids += [l.rstrip("\n") for l in open(a.from_file) if l.strip()]
+        with open(a.from_file) as fh:
+            vids += [l.rstrip("\n") for l in fh if l.strip()]
+    if not vids:
+        ap.error("no videos given (positionals or --from-file)")
+    require_ffmpeg()
+    _frameworks()
     print(json.dumps([probe(v, a.outdir) for v in vids], indent=1))
+
+if __name__ == "__main__":
+    main()

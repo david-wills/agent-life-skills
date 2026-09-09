@@ -1,69 +1,69 @@
 #!/usr/bin/env python3
-"""Shared Playwright helper for the restaurant-saver skill.
+"""Playwright helper: a persistent Chrome profile signed into Google Maps.
 
-Persistent browser context dedicated to the Maps Google account
-(``accounts.personal``). First run requires visible-browser sign-in;
-cookies persist.
+The profile lives at ``<data_root>/restaurant-saver/chrome-profile/`` and is
+signed into ``accounts.personal`` once, via ``login.py``. Cookies persist, so
+every later run is headless.
+
+Playwright is imported inside ``maps_context`` so that every script's
+``--help`` works without it installed.
 """
 from __future__ import annotations
 
 import contextlib
+import os
+import re
 import sys
 from pathlib import Path
-
-from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).parent))
 import restaurant_common as rc  # noqa: E402
 
-WORKSPACE = Path.home() / ".openclaw" / "workspace"
-PROFILE_DIR = WORKSPACE / "restaurant-saver" / "chrome-profile"
-PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-
-# Resolved lazily (PEP 562) so a missing config key cannot break import for
-# callers that never touch the account. Real value: config.local.json.
-_CONFIG_ATTRS = {"EXPECTED_ACCOUNT": "accounts.personal"}
+PLAYWRIGHT_HINT = "playwright is not installed: pip install -r requirements.txt && python -m playwright install"
 
 
-def __getattr__(name: str):
-    key = _CONFIG_ATTRS.get(name)
-    if key is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return rc.cfg(key)
-
-
-def __dir__() -> list[str]:
-    return sorted(list(globals()) + list(_CONFIG_ATTRS))
-
-# Match real Chrome on macOS (channel="chrome" reports HeadlessChrome in
-# headless mode; overriding keeps Google from flagging it).
-def USER_AGENT() -> str:  # noqa: N802 - kept callable so the version is read live
-    return rc.chrome_ua()
+def profile_dir() -> Path:
+    return rc.skill_data_dir() / "chrome-profile"
 
 
 @contextlib.contextmanager
 def maps_context(headless: bool = True):
     """Yield a Playwright BrowserContext bound to the Maps profile.
 
-    Uses the real installed Google Chrome (channel="chrome") rather than
-    Playwright's bundled "Chrome for Testing" — Google blocks the latter
-    on sign-in with "this browser may not be secure". Adds light stealth
-    (drop navigator.webdriver, suppress --enable-automation switches) so
-    Google's bot heuristics don't trip on the persistent profile.
+    Drives the real installed Google Chrome (``channel="chrome"``, or the
+    binary in ``CHROME_PATH``) rather than Playwright's bundled Chromium, which
+    Google refuses to sign in ("this browser may not be secure").
+
+    The flags below reduce automation fingerprinting so a signed-in Maps
+    session behaves like a normal browser: no ``--enable-automation`` switch,
+    ``navigator.webdriver`` undefined, and a UA that matches the installed
+    Chrome. Be clear about what that is: this is scraping Google Maps through
+    a logged-in account, and Google's terms of service may prohibit it. Use at
+    your own risk.
     """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise SystemExit(PLAYWRIGHT_HINT) from exc
+
+    pdir = profile_dir()
+    pdir.mkdir(parents=True, exist_ok=True)
+    launch: dict = dict(
+        user_data_dir=str(pdir),
+        headless=headless,
+        user_agent=rc.chrome_ua(),
+        viewport={"width": 1280, "height": 900},
+        locale="en-US",
+        args=["--disable-blink-features=AutomationControlled"],
+        ignore_default_args=["--enable-automation"],
+    )
+    if os.environ.get("CHROME_PATH"):
+        launch["executable_path"] = rc.chrome_bin()
+    else:
+        launch["channel"] = "chrome"
+
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel="chrome",
-            headless=headless,
-            user_agent=USER_AGENT(),
-            viewport={"width": 1280, "height": 900},
-            locale="en-US",
-            args=[
-                "--disable-blink-features=AutomationControlled",
-            ],
-            ignore_default_args=["--enable-automation"],
-        )
+        ctx = p.chromium.launch_persistent_context(**launch)
         ctx.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
@@ -73,12 +73,11 @@ def maps_context(headless: bool = True):
             ctx.close()
 
 
-def signed_in_email(page: Page) -> str | None:
+def signed_in_email(page) -> str | None:
     """Return the email of the currently signed-in Google account, or None.
 
-    Maps does not expose a stable account selector. We fetch the lightweight
-    accounts.google.com endpoint that returns the active account info as text
-    once the session cookies are valid.
+    Maps does not expose a stable account selector, so read it off the
+    account home page once the session cookies are valid.
     """
     try:
         page.goto(
@@ -95,15 +94,5 @@ def signed_in_email(page: Page) -> str | None:
         body = ""
     if "@" not in body:
         return None
-    import re
     m = re.search(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", body)
     return m.group(0) if m else None
-
-
-def assert_correct_account(page: Page) -> None:
-    """Raise if the active Google session is not the expected Maps account."""
-    email = signed_in_email(page)
-    if email is None:
-        raise RuntimeError("not_logged_in")
-    if email.lower() != rc.cfg("accounts.personal").lower():
-        raise RuntimeError(f"wrong_account:{email}")

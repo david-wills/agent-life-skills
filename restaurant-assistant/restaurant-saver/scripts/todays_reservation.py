@@ -19,7 +19,7 @@ from calendar_lib import fetch_events, reservation_detail  # noqa: E402
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Is there a restaurant reservation on the calendar for the day?")
     ap.add_argument("--date", default=None, help="YYYY-MM-DD (default: today)")
     args = ap.parse_args()
 

@@ -1,3 +1,6 @@
-# Drives a persistent Chrome profile for Google Maps and the booking sites.
-# After installing: python -m playwright install chromium
+# Drives a persistent profile in the real Google Chrome.app for Google Maps.
+# Playwright's bundled Chromium is NOT used (Google refuses to sign it in), so
+# `python -m playwright install` is only needed for the driver; Google Chrome
+# must already be installed. As written, the Chrome path is macOS only; set
+# CHROME_PATH to override it elsewhere.
 playwright>=1.45

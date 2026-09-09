@@ -13,13 +13,13 @@ the others.
 ```
 your RSS feed list
      │
-     │  morning-news — 6:00 AM
+     │  morning-news — daily
      ▼
 Discord #newsfeed ──── you save the interesting ones ────┐
                                                           ▼
                                              Readwise Reader inbox
                                                           │
-                                    reading-list — 5:45 AM / 5:45 PM
+                                           reading-list — twice a day
                                                           ▼
                                           Discord #reading-list
                                        one card per article, summarized
@@ -30,24 +30,25 @@ Discord #newsfeed ──── you save the interesting ones ────┐
                                                           ▼
                             import-reader-archive · import-readwise-highlights
                                     what you read, and what you marked in it,
-                                          back out as JSON on disk
+                                  back out as JSON, then into a local FTS index
 ```
 
 ## The pieces
 
 | Skill | Runs | Does |
 | --- | --- | --- |
-| [`morning-news`](morning-news/) | 6:00 AM | Pulls your RSS feed list, classifies the last 24 hours against a personal interest profile, posts one message per theme. |
-| [`reading-list`](reading-list/) | 5:45 AM / 5:45 PM | Summarizes everything newly saved to the Reader inbox into three paragraphs, posts one card per article with reaction affordances. A nightly sweep turns those reactions into real Reader actions. |
-| [`import-reader-archive`](import-reader-archive/) | On demand | Dumps every document you have finished — `location=archive` — to JSON. |
-| [`import-readwise-highlights`](import-readwise-highlights/) | On demand | Dumps the highlights you made, raw JSON plus a markdown digest grouped by book. |
+| [`morning-news`](morning-news/) | Daily (the author: 6:00 AM) | Pulls your RSS feed list, classifies the last 24 hours against a personal interest profile, posts one message per theme. |
+| [`reading-list`](reading-list/) | Twice daily, plus a nightly sweep | Summarizes everything newly saved to the Reader inbox into three paragraphs, posts one card per article with reaction affordances. The sweep turns those reactions into real Reader actions. |
+| [`import-reader-archive`](import-reader-archive/) | On demand, or a daily delta | Dumps every document you have finished — `location=archive` — to JSON, and ingests it into the local full-text index. |
+| [`import-readwise-highlights`](import-readwise-highlights/) | On demand, or a daily delta | Dumps the highlights you made, raw JSON plus a markdown digest grouped by book, and ingests them into the same index. |
 
 ## Ideas worth stealing
 
 **The agent is the model; the scripts are the deterministic ends.** `morning-news`
-contains no API key and no LLM call. A cron runs an agent turn, and that agent
-does the classifying — the scripts only fetch and post. This is why the whole
-thing is publishable: there is no prompt-plus-key blob at the center to scrub.
+contains no API key and no LLM call. A scheduler runs an agent turn, and that
+agent does the classifying — the scripts only fetch and post. This is why the
+whole thing is publishable: there is no prompt-plus-key blob at the center to
+scrub.
 
 **Separate the engine from the opinion.** `prompt.md` says how a digest is
 produced. `profile.local.md` says what belongs in it: the themes, the item
@@ -83,13 +84,18 @@ already happened under your own session.
 nothing, so a queue years deep only ever grew. Now any run with fewer than three
 new saves tops itself up from the back catalog — but a run with twelve new saves
 posts all twelve and backfills nothing. One table of processed document ids is
-the only state; selection is a live inbox scan minus that table, so there is no
-cursor to disagree with reality.
+the only record of what has been done; selection is a live inbox scan minus that
+table, so there is no cursor to disagree with reality.
 
-**A dud backfill pick is not an error.** A 2022 save whose text was never
+**A dud backfill pick is not an error.** An old save whose text was never
 retrievable is expected. Those are reported separately from genuine failures,
-because a cron that pages on the expected case gets muted, and then it does not
-page on the real one either.
+because a scheduler that pages on the expected case gets muted, and then it does
+not page on the real one either.
+
+**An unreadable card is an error, not an empty one.** When the sweep cannot read
+a card's reactions, it records that against the card rather than treating it as
+"no reaction". Otherwise an expired bot token would quietly age out every pending
+article.
 
 **Validate the whole batch before sending any of it.** `morning-news` refuses to
 post if one message exceeds Discord's 2000-character limit. Validating as it went
@@ -100,8 +106,15 @@ the wrong digest cannot silently skip its first N sections.
 
 ## Running it
 
-You need a Readwise account with Reader, a Discord bot in a server you control,
-Python 3.11+, and the Claude CLI on `PATH` for `reading-list`'s summaries.
+You need:
+
+- a Readwise account with Reader, and its API token as `READWISE_TOKEN`
+- a Discord bot in a server you control, and its token as `DISCORD_BOT_TOKEN`
+- Python 3.11+
+- the `claude` CLI on `PATH`, for `reading-list`'s summaries and for
+  `import-reader-archive`'s ingest of documents Reader did not summarize itself
+- `pip install -r morning-news/requirements.txt` (feed parsing is not in the
+  stdlib; a venv is the sane place for it)
 
 ```bash
 cp config.example.json config.json                    # your Discord channel ids
@@ -122,27 +135,27 @@ against someone else's channels:
 2. `config.local.json` — gitignored, for anything sensitive or per-machine
 3. `config.json`
 
-Tokens are read at runtime, never from the config: `READWISE_TOKEN` and
-`DISCORD_BOT_TOKEN`. `morning-news` wants its own virtualenv —
-`pip install -r morning-news/requirements.txt`, since the stdlib is not enough
-for feed parsing.
+Tokens are read at runtime, never from the config. Everything the skills write —
+the SQLite index, import dumps, resume state — lands under `paths.data_root`
+(default `_data/` at the repo root, gitignored); every script takes a flag to
+point elsewhere.
 
 Each skill's `SKILL.md` carries its own flags, invariants and failure modes.
 Start with `--dry-run`; every stage that posts has one.
 
 ## Honest limits
 
-- **Scheduling is macOS `launchd`.** The `.plist.template` files carry `{{HOME}}`
-  and need rendering. Nothing here is portable to systemd without a rewrite of
-  that layer, though the scripts themselves are plain Python.
+- **Nothing here ships a scheduler.** Each skill is a script or a prompt you run
+  from cron, launchd, or an agent scheduler of your choice; the times above are
+  the author's, not defaults. The scripts print a JSON status line and exit
+  non-zero on hard failure, which is all a scheduler needs to alert on.
 - **Discord is assumed, not abstracted.** The reaction contract in `reading-list`
   is built on Discord's per-message reactions; there is no posting interface to
   swap out.
 - **Feed runs are not reproducible.** Two fetches seconds apart routinely differ
   by an item, because outlets re-publish the same story under a second URL. A
   one-item delta between runs is not a bug.
-- **There is no search front-end yet.** The two importers ship with their
-  ingesters, so what you have read and highlighted lands in a SQLite FTS5 index
-  at `knowledge/index.db` — but the ranked query tool over that index is part of
-  a `second-brain` package that is not published. Until it is, `sqlite3` on the
-  file is the interface.
+- **There is no search front-end.** The two importers ship with their ingesters,
+  so what you have read and highlighted lands in a SQLite FTS5 index at
+  `<data_root>/knowledge/index.db` — but a query tool over that index is not
+  included. `sqlite3` on the file is the interface.

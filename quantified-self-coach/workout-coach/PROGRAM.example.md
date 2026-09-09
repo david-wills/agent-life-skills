@@ -1,7 +1,8 @@
 # Workout coach program — example
 
-Copy to `workspace/workout-coach/PROGRAM.md` and rewrite for yourself. That path is
-outside this repo; this file is the published template.
+Copy to `<data_root>/workout-coach/PROGRAM.md` and rewrite for yourself.
+`<data_root>` is `paths.data_root` in `config.json`, default `<repo>/_data`,
+which is gitignored; this file is the published template.
 
 This file is the exercise vocabulary. The coach picks 4-6 movement-pattern slots per
 session and fills each from the pool below — it never invents an exercise that is not
@@ -16,7 +17,7 @@ here.
 - **Names must match your logging app's exercise titles exactly.** `push_to_hevy_routine.py`
   resolves each name against the cached template list and aborts with close-match
   suggestions on a miss. Where your preferred wording differs from the app's, put the
-  app's title here and record your wording in `hevy-cache/aliases.json`.
+  app's title here and record your wording in `<data_root>/workout-coach/hevy-cache/aliases.json`.
 
 ## Defaults
 

@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-"""Open a visible Chromium window to sign into the Maps account (accounts.personal).
+"""One-time visible sign-in for the Maps browser profile.
 
-Usage:
     python3 login.py
 
-The window opens to accounts.google.com. Sign in (handle 2FA), then press
-Enter in the terminal to close. Cookies persist in chrome-profile/.
+Opens a visible Chrome window at accounts.google.com. Sign in as
+``accounts.personal`` (handle 2FA), then press Enter in the terminal to close.
+Cookies persist in ``<data_root>/restaurant-saver/chrome-profile/`` and every
+later run is headless. Re-run this whenever a script reports ``not_logged_in``
+or ``wrong_account``.
 """
 from __future__ import annotations
 
+import argparse
 import sys
+from pathlib import Path
 
-from browser import EXPECTED_ACCOUNT, maps_context, signed_in_email
+sys.path.insert(0, str(Path(__file__).parent))
+
+import restaurant_common as rc  # noqa: E402
+from browser import maps_context, signed_in_email  # noqa: E402
 
 
 def main() -> int:
-    print(f"Opening visible browser. Sign into {EXPECTED_ACCOUNT}.")
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    ap.parse_args()
+
+    expected = rc.cfg("accounts.personal")
+    print(f"Opening visible browser. Sign into {expected}.")
     print("After you see the Google account home, press Enter here to close.")
     with maps_context(headless=False) as ctx:
         page = ctx.new_page()
@@ -26,10 +37,10 @@ def main() -> int:
             pass
         email = signed_in_email(page)
         if email is None:
-            print("ERROR: no signed-in account detected.", file=sys.stderr)
+            print("ERROR: not_logged_in — no signed-in account detected.", file=sys.stderr)
             return 1
-        if email.lower() != EXPECTED_ACCOUNT.lower():
-            print(f"ERROR: signed in as {email}, expected {EXPECTED_ACCOUNT}.", file=sys.stderr)
+        if email.lower() != expected.lower():
+            print(f"ERROR: wrong_account — signed in as {email}, expected {expected}.", file=sys.stderr)
             return 2
         print(f"OK — signed in as {email}.")
     return 0

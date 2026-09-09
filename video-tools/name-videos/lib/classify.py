@@ -1,9 +1,11 @@
 """Decide whether a video filename is already named per the house naming convention."""
 import re, os
 
+# House convention: the series/format tags a finished name may start with. Edit
+# or empty this list for another convention; hint.py imports it from here.
 PREFIXES = ["SPOTLIGHT","HOSTED","TRENDING","BRAND","MEME","IIWW","NBK",
             "WHF","WHR","WH","RWR","RW","NS"]
-PFX   = re.compile(r'^(%s)\b[\s\-]*' % "|".join(PREFIXES))
+PFX   = re.compile(r'^(%s)\b[\s\-]*' % "|".join(PREFIXES)) if PREFIXES else re.compile(r'(?!)')
 ANNOT = re.compile(r'^\((DO NOT RECYCLE|TOO LONG|OVER [^)]+)\)\s*', re.I)
 
 JUNK = [
@@ -29,7 +31,7 @@ def is_named(filename):
         if rx.search(body):
             return False, why
     words = body.split()
-    # "SPOTLIGHT Biosphere" is a complete name; a bare "Biosphere" is not.
+    # "SPOTLIGHT Reefs" is a complete name; a bare "Reefs" is not.
     if len(words) < (1 if has_prefix else 2):
         return False, "too few words"
     if not re.search(r'[a-z]', body) and len(words) < 4:

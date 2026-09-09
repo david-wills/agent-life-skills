@@ -1,8 +1,8 @@
 # Video tools
 
 One skill: name finished short-form videos from what is on the screen. Editors
-export files called `HOSTED_KARAOKE.mp4` and `WH_Biosphere_SPOTLIGHT.mov`; the
-team needs `HOSTED Famous Song Lyrics You Definitely Get Wrong.mp4`. The title
+export files called `HOSTED_DENTIST_v2.mp4` and `WH_Coral_Reefs_SPOTLIGHT.mov`; the
+team needs `HOSTED Things Your Dentist Wishes You Knew.mp4`. The title
 is right there in the first few seconds of video, so read it off.
 
 Everything that looks at pixels runs on-device. ffmpeg pulls frames, Apple's
@@ -36,14 +36,17 @@ a drop folder of exports
 
 ## The pieces
 
+The CLIs live in `name-videos/lib/` rather than `scripts/` because they also
+import each other (`probe` uses `hint`, `hint` and `scan` use `classify`).
+
 | Script | Does |
 | --- | --- |
-| `scan.py` | Lists files in the drop folders that still need naming, and how many were skipped as already named. |
-| `classify.py` | Decides whether a filename already follows the house convention. |
-| `probe.py` | Frame extraction, OCR, title-band clustering, talking-head detection, a still for the first clip. Batch several files per call. |
-| `hint.py` | Turns `WHR_Mayan_Life_SPOTLIGHT.mov` into `Mayan Life`. |
-| `rename.py` | Applies a JSON plan. Dry run by default, `--apply` to execute, strips filesystem-hostile characters, never overwrites. |
-| `undo.py` | Replays an undo log backwards. |
+| `scan.py` | Lists files in the drop folders that still need naming, and how many were skipped as already named. `--json` for the machine-readable form. |
+| `classify.py` | Decides whether a filename already follows the house convention. Library only; holds the series-tag list. |
+| `probe.py` | Frame extraction, OCR, title-band clustering, talking-head detection, a still for the first clip. Batch several files per call, or `--from-file`. |
+| `hint.py` | Turns `WH_Coral_Reefs_SPOTLIGHT.mov` into `Coral Reefs`. Filenames as arguments or on stdin. |
+| `rename.py` | Applies a JSON plan. Dry run by default, `--apply` to execute, strips filesystem-hostile characters, never overwrites, refuses a plan with duplicate targets. |
+| `undo.py` | Replays an undo log backwards. `--dry-run` to preview. |
 
 ## Ideas worth stealing
 
@@ -68,15 +71,18 @@ meme, and memes get hand-written codenames. Report it and move on.
 
 **Renames on a shared drive are visible to everyone and break links.** So the
 plan is always shown as a dry-run table first, the apply step needs an explicit
-confirmation, and every apply writes an undo log.
+confirmation, every apply writes an undo log, and a plan that would give two
+files the same name is refused whole rather than half-applied.
 
 ## Running it
 
 - macOS only. `brew install ffmpeg`, then the pyobjc frameworks in
-  `requirements.txt`.
-- Point `scan.py` at your drop folders: the two paths at the top of the file,
-  or pass folders on the command line. The `CUTDOWNS` subfolder rule (always
-  `SPOTLIGHT`) is a house convention; change it or delete it.
+  `requirements.txt`. `probe.py` exits with one line if either is missing.
+- Point `scan.py` at your drop folder: pass one or more folders on the command
+  line (works with no config at all), or set the optional config key
+  `paths.video_drop` to the folder's absolute path and run it bare, which also
+  scans its `CUTDOWNS` subfolder. The `CUTDOWNS` rule (always `SPOTLIGHT`) is a
+  house convention; change it or delete it in `scan.py`.
 - Probing a file on a cloud-synced drive streams it, so expect 10-30 seconds
   per video. Pass several paths in one call.
 

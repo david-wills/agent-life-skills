@@ -3,18 +3,16 @@
 
 Usage:
   report.py                 # today so far, print + post
-  report.py --day 2026-09-03
+  report.py --day YYYY-MM-DD
+  report.py --yesterday     # the previous day (what the morning schedule runs)
   report.py --week          # the current 7-day quota window
   report.py --no-post       # print only
+  report.py --no-collect    # skip the ingest + quota sample; report on what is stored
 """
 import argparse
-import json
 import os
-import re
 import sys
-import urllib.request
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,7 +22,6 @@ import offmachine
 import quota as quota_mod
 
 PT = ZoneInfo("America/Los_Angeles")
-SERVICE_ENV = Path.home() / ".openclaw/service-env/ai.openclaw.gateway.env"
 
 
 # ---------------------------------------------------------------- quota model
@@ -34,10 +31,10 @@ def segment_rates(con, lo, hi):
 
     Utilization resets mid-window (credits, plan changes), so the window splits
     into segments. Each is an independent estimate, and comparing them is the
-    only honest check on the conversion: on 2026-09-04 two segments of the same
-    week gave $29.66 and $69.81 per point -- a 2.4x spread. The quota is not
-    denominated in dollars, so the rate moves with model mix. A single point
-    estimate reads far more precise than the thing being measured.
+    only honest check on the conversion: in one observed week two segments of
+    the same window differed 2.4x. The quota is not denominated in dollars, so
+    the rate moves with model mix. A single point estimate reads far more
+    precise than the thing being measured.
     """
     rows = con.execute(
         """SELECT ts, seven_day_pct FROM quota_samples
@@ -80,12 +77,12 @@ def quota_calibration(con, q):
     derive it from measured spend against reported utilization.
 
     The subtlety is that reported utilization is not monotonic within a window.
-    On 2026-09-04 it fell from 24% to 1% with `resets_at` unchanged -- an
-    out-of-band credit or plan adjustment, not a window roll. Dividing the whole
-    window's spend by the post-reset 1% would have overstated the rate ~23x and
-    made every workflow's quota share meaningless. So we calibrate only over the
-    latest monotonic segment: spend since the last drop, against the rise since
-    that same point.
+    It has been seen to fall from double digits to near zero with `resets_at`
+    unchanged -- an out-of-band credit or plan adjustment, not a window roll.
+    Dividing the whole window's spend by the post-reset percentage would
+    overstate the rate by an order of magnitude and make every workflow's quota
+    share meaningless. So we calibrate only over the latest monotonic segment:
+    spend since the last drop, against the rise since that same point.
 
     Returns (usd_per_pct, window_spend, (start, end), reset_detected).
     """
@@ -262,7 +259,7 @@ def build(con, day=None, week=False):
     multi = len(machines) > 1
     for label, kind, host, sessions, tin, tout, c in rows:
         tag = {"cron": "⏱", "channel": "💬", "terminal": "⌨️", "unattributed": "❓"}.get(kind, "·")
-        where_tag = f" _({host})_" if multi and host != "mini" else ""
+        where_tag = f" _({host})_" if multi and host != lib.local_host() else ""
         L.append(f"{tag} **{label}**{where_tag} — ${c:.2f} ({pct_of_week(c)}) · "
                  f"{human(tin)} in / {human(tout)} out · {sessions} run{'s' if sessions != 1 else ''}")
 
@@ -335,54 +332,27 @@ def build(con, day=None, week=False):
 
 # ---------------------------------------------------------------- delivery
 
-def discord_token():
-    tok = os.environ.get("DISCORD_BOT_TOKEN")
-    if tok:
-        return tok
-    if SERVICE_ENV.exists():
-        m = re.search(r"DISCORD_BOT_TOKEN='([^']+)'", SERVICE_ENV.read_text(encoding="utf-8"))
-        if m:
-            return m.group(1)
-    raise RuntimeError("DISCORD_BOT_TOKEN not found (env or service-env)")
+def post(text, channel=None):
+    """Post to the token-tracker channel through the shared Discord transport.
 
-
-def post(text, channel=lib.DISCORD_CHANNEL):
-    token = discord_token()
-    for chunk in chunks(text):
-        body = json.dumps({"content": chunk, "flags": 4,
-                           "allowed_mentions": {"parse": []}}).encode("utf-8")
-        req = urllib.request.Request(
-            f"https://discord.com/api/v10/channels/{channel}/messages",
-            data=body,
-            headers={"Authorization": f"Bot {token}",
-                     "Content-Type": "application/json; charset=utf-8",
-                     "User-Agent": "OpenClaw token-tracker"})
-        resp = json.loads(urllib.request.urlopen(req, timeout=20).read())
-        if not resp.get("id"):
-            raise RuntimeError(f"discord post failed: {resp}")
-
-
-def chunks(text, limit=1900):
-    out, cur = [], ""
-    for line in text.split("\n"):
-        if len(cur) + len(line) + 1 > limit:
-            out.append(cur)
-            cur = ""
-        cur += line + "\n"
-    if cur.strip():
-        out.append(cur)
-    return out
+    The channel id and bot token are both resolved here, not at import, so the
+    report can be built and printed without any Discord configuration.
+    """
+    from discord import send_message   # repo-root lib/discord.py, on sys.path via lib
+    send_message(channel or lib.discord_channel(), text)
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--day")
+    ap = argparse.ArgumentParser(description="Build the token/cost/quota report and post it to Discord.")
+    ap.add_argument("--day", metavar="YYYY-MM-DD", help="report on one specific day")
     ap.add_argument("--yesterday", action="store_true",
-                    help="report on the previous day -- what the 5:25am run wants, "
+                    help="report on the previous day -- what an early-morning schedule wants, "
                          "since 'today' is a few minutes old at that hour")
-    ap.add_argument("--week", action="store_true")
-    ap.add_argument("--no-post", action="store_true")
-    ap.add_argument("--no-collect", action="store_true")
+    ap.add_argument("--week", action="store_true",
+                    help="cover the whole current 7-day quota window instead of one day")
+    ap.add_argument("--no-post", action="store_true", help="print only; do not post to Discord")
+    ap.add_argument("--no-collect", action="store_true",
+                    help="skip the ingest, attribution and quota sample; report on stored data")
     a = ap.parse_args()
 
     con = lib.connect()

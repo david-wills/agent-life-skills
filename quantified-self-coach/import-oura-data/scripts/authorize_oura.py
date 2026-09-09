@@ -6,11 +6,12 @@ returns BOTH an access token and a refresh token. The importer then auto-refresh
 the access token using the refresh token and persists rotated tokens back.
 
 What this does:
-  1. Reads OURA_CLIENT_ID and OURA_CLIENT_SECRET from 1P (via read_secret).
+  1. Reads OURA_CLIENT_ID and OURA_CLIENT_SECRET via lib/read_secret.py
+     (env var, 1Password, keychain, or secrets.json).
   2. Spins up a local HTTP listener on http://localhost:8080/callback.
   3. Opens a browser to Oura's authorize URL (with state + CSRF guard).
   4. Catches the redirect, exchanges the `code` for access + refresh tokens.
-  5. Writes both tokens (plus expires_at) to ~/.openclaw/oura_tokens.json
+  5. Writes both tokens (plus expires_at) to <data_root>/oura/oura_tokens.json
      (mode 0600). The importer reads/writes this file from then on.
 
 Prereqs (do these first):
@@ -18,7 +19,7 @@ Prereqs (do these first):
   - Redirect URI in the dev console set EXACTLY to:
         http://localhost:8080/callback
     (case + trailing path sensitive — copy-paste, don't re-type.)
-  - Client ID + Client Secret already stored in 1P (OpenClaw vault) as
+  - Client ID + Client Secret stored where read_secret can find them, as
     OURA_CLIENT_ID and OURA_CLIENT_SECRET.
 
 Usage:
@@ -45,14 +46,14 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
-
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2). Walk up to find it
-# rather than hardcoding a path: skills are reached through a symlink.
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in pathlib.Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-from read_secret import read_secret, SecretError  # noqa: E402
+
+from read_secret import SecretError, read_secret  # noqa: E402
 
 
 CALLBACK_HOST = "localhost"
@@ -108,11 +109,11 @@ def _port_in_use(host: str, port: int) -> bool:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "--output",
-        default=str(pathlib.Path.home() / ".openclaw" / "oura_tokens.json"),
-        help="File path to write the token JSON (mode 0600). Default: ~/.openclaw/oura_tokens.json",
+        default=None,
+        help="File path to write the token JSON (mode 0600). Default: <data_root>/oura/oura_tokens.json",
     )
     return p.parse_args()
 
@@ -132,7 +133,11 @@ def _write_tokens(path: pathlib.Path, payload: dict) -> None:
 def main() -> int:
     global _expected_state
     args = _parse_args()
-    output_path = pathlib.Path(args.output).expanduser()
+    if args.output:
+        output_path = pathlib.Path(args.output).expanduser()
+    else:
+        from skill_config import data_root
+        output_path = data_root() / "oura" / "oura_tokens.json"
 
     try:
         client_id = read_secret("OURA_CLIENT_ID")
@@ -140,8 +145,8 @@ def main() -> int:
     except SecretError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print(
-            "Save OURA_CLIENT_ID and OURA_CLIENT_SECRET to the OpenClaw "
-            "1Password vault before running this.",
+            "Store OURA_CLIENT_ID and OURA_CLIENT_SECRET where lib/read_secret.py "
+            "can find them before running this.",
             file=sys.stderr,
         )
         return 1

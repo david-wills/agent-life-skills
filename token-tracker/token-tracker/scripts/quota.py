@@ -5,7 +5,15 @@ Reads the same endpoint Claude Code's /usage command uses, with the OAuth token
 from the macOS keychain. This is the only source of *actual* quota consumption --
 token counts alone can't tell you what fraction of the subscription you've burned,
 because Anthropic's limits aren't published as token numbers.
+
+Needs a Claude Code subscription login (the keychain item Claude Code writes when
+you sign in). With an API key there is no quota to sample: the script exits 1 with
+one line saying so, and the rest of the tracker keeps working on counts and cost.
+
+Usage:
+  quota.py            # take one sample and print it
 """
+import argparse
 import json
 import os
 import sys
@@ -73,7 +81,7 @@ def latest(con):
 def detect_reset(con):
     """Utilization falling without the window rolling = an out-of-band change.
 
-    Happened on 2026-09-04 (weekly 24% -> 1%, resets_at unchanged) and went
+    It happens (a credit or plan adjustment on Anthropic's side) and can go
     unnoticed for hours. Worth telling the user about, because it silently
     invalidates the quota calibration until usage rebuilds.
     """
@@ -104,9 +112,16 @@ def mark_alerted(con, kind, ref_ts):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.parse_args()
+    try:
+        data = fetch()
+    except RuntimeError as e:          # no subscription login in the keychain
+        print(f"quota: {e}", file=sys.stderr)
+        raise SystemExit(1)
     con = lib.connect()
     lib.init(con)
-    row = record(con, fetch())
+    row = record(con, data)
     print(f"5h={row[1]}%  7d={row[3]}%  scoped={row[7]}  (7d resets {row[4]})")
     con.close()
 

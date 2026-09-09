@@ -2,8 +2,12 @@
 """Hourly: turn a ✅ on a suggestion card into a booking intent.
 
 The sweep never books. It resolves reactions into state and hands the agent an
-explicit work list — booking is an external, hard-to-reverse action and stays
-behind the user's ✅ plus a deliberate call to book_reservation.py.
+explicit ``to_book`` work list — booking is an external, hard-to-reverse action
+and this package deliberately stops at the intent.
+
+A card whose reactions cannot be read (deleted message, expired token) is
+reported in ``errors`` and makes the exit code non-zero. It is never counted
+as "no reaction".
 """
 from __future__ import annotations
 
@@ -16,21 +20,27 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import restaurant_common as rc  # noqa: E402
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2). Walk up to find it
-# rather than hardcoding a path: skills are reached through a symlink.
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-import socratic_common as sc  # noqa: E402
+
+from discord import DiscordError, fetch_message_reactions, get_discord_token, strip_variation_selectors  # noqa: E402
 
 BOOK_EMOJI = "✅"
 CANCEL_EMOJI = "❌"
 
 
+def _has(reactions: list[dict], emoji: str) -> bool:
+    want = strip_variation_selectors(emoji)
+    return any(strip_variation_selectors(r["name"]) == want and r["by_user"] for r in reactions)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
+    ap = argparse.ArgumentParser(description="Read ✅/❌ on open suggestion cards and emit a to_book list.")
+    ap.add_argument("--dry-run", action="store_true", help="Report without updating suggestion state")
     args = ap.parse_args()
 
     conn = rc.connect()
@@ -40,15 +50,18 @@ def main() -> int:
         "WHERE s.state = 'offered' AND s.target_date >= date('now', '-1 day')"
     ).fetchall()
 
-    token = sc.get_discord_token()
-    to_book, declined = [], []
+    token = get_discord_token() if rows else None
+    to_book, declined, errors = [], [], []
 
     for s in rows:
-        reactions = sc.fetch_message_reactions(s["channel"], s["message_id"], token=token)
-        picked = any(sc.strip_vs(r["name"]) == sc.strip_vs(BOOK_EMOJI) and r["by_user"]
-                     for r in reactions)
-        nixed = any(sc.strip_vs(r["name"]) == sc.strip_vs(CANCEL_EMOJI) and r["by_user"]
-                    for r in reactions)
+        try:
+            reactions = fetch_message_reactions(s["channel"], s["message_id"], token=token)
+        except DiscordError as exc:
+            errors.append({"suggestion_id": s["id"], "name": s["name"],
+                           "message_id": s["message_id"], "error": str(exc)})
+            continue
+        picked = _has(reactions, BOOK_EMOJI)
+        nixed = _has(reactions, CANCEL_EMOJI)
         if picked and nixed:
             # Conflicting verbs are never resolved by guessing.
             continue
@@ -91,8 +104,9 @@ def main() -> int:
         "to_book": actionable,
         "declined": declined,
         "conflicts": conflicts,
+        "errors": errors,
     }, indent=2))
-    return 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

@@ -6,8 +6,11 @@ Adds three things resolve_place.py does not give us:
   2. the reservation platform + booking URL
   3. cuisine / price / rating off the place panel
 
+Price is stored exactly as Maps prints it — "$$", "$$$$", "$20–30", "$100+" —
+not normalised to a dollar count, so the card shows what the user would see.
+
 Usage:
-    enrich_place.py "<maps place url>" [--watch]
+    enrich_place.py "<maps place url>" [--watch] [--skip-drive]
 Output: JSON to stdout.
 """
 from __future__ import annotations
@@ -25,6 +28,15 @@ import restaurant_common as rc  # noqa: E402
 from browser import maps_context  # noqa: E402
 
 DURATION_RE = re.compile(r"\b(\d+)\s*hr\s*(\d+)?\s*min\b|\b(\d+)\s*min\b", re.I)
+
+# Maps renders price as either a tier ("$", "$$" ... "$$$$") or a per-person
+# range ("$20–30", "$30-50", "$100+"). Match either, as a whole token.
+PRICE_RE = re.compile(
+    r"(?<![\w$])("
+    r"\${1,4}(?![\w$])"                                  # $ … $$$$
+    r"|\$\d[\d,]*(?:\s*[\u2013\u2014-]\s*\$?\d[\d,]*)?\+?"  # $20–30, $100+
+    r")(?![\w$])"
+)
 
 # Booking hosts worth capturing off the Maps place panel.
 BOOKING_HOSTS = (
@@ -53,7 +65,7 @@ def drive_from_home(ctx, dest: str) -> dict[str, object]:
     page = ctx.new_page()
     url = (
         "https://www.google.com/maps/dir/?api=1"
-        f"&origin={urllib.parse.quote(rc.HOME['address'])}"
+        f"&origin={urllib.parse.quote(rc.cfg('user.home')['address'])}"
         f"&destination={urllib.parse.quote(dest)}"
         "&travelmode=driving"
     )
@@ -113,7 +125,7 @@ def place_details(ctx, place_url: str) -> dict[str, object]:
     if m:
         out["rating"] = m.group(1)
         out["review_count"] = m.group(2)
-    m = re.search(r"(\${1,4})(?:[^\w]|$)", body)
+    m = PRICE_RE.search(body)
     if m:
         out["price"] = m.group(1)
 
@@ -148,10 +160,10 @@ def place_details(ctx, place_url: str) -> dict[str, object]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("place_url")
-    ap.add_argument("--watch", action="store_true")
-    ap.add_argument("--skip-drive", action="store_true")
+    ap = argparse.ArgumentParser(description="Enrich a Maps place URL with drive time, booking link and details.")
+    ap.add_argument("place_url", help="A google.com/maps/place/... URL")
+    ap.add_argument("--watch", action="store_true", help="Run with a visible browser window")
+    ap.add_argument("--skip-drive", action="store_true", help="Skip the drive-time lookup")
     args = ap.parse_args()
 
     with maps_context(headless=not args.watch) as ctx:

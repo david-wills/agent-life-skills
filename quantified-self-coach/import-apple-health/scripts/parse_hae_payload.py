@@ -6,25 +6,48 @@ HAE writes (and POSTs) two payload shapes:
   Workouts:     {"data": {"workouts": [{name, start, end, heartRate, ...}]}}
 
 Both shapes are merged into one file per day at:
-    knowledge/apple-health/YYYY-MM-DD.md
+    <data_root>/knowledge/apple-health/YYYY-MM-DD.md
 
-The parser is idempotent: passing the same payload twice yields the same
-markdown. When metrics for a date already exist, the new payload's values win
-(latest sync is authoritative).
+with a JSON sidecar holding the unrendered points at:
+    <data_root>/knowledge/apple-health/.sidecar/YYYY-MM-DD.json
+
+The sidecar is the record; the markdown is a rendering of it. Merging is
+idempotent: passing the same payload twice yields the same files. When a date
+already has data, any metric *name* present in the new payload replaces the old
+points for that name (latest sync is authoritative); workouts are keyed by id
+(or start+name) and replaced individually; device sources are unioned.
+
+If a per-day `.md` exists without a sidecar, the merge recovers what it can from
+the markdown (one point per metric line, the headline numbers per workout) so a
+later sync never silently discards the day. The recovered state is written to
+the sidecar on that merge, and the sidecar is authoritative from then on.
 
 Tweakable knobs at the top of this module:
   CORE_METRICS  — names that surface in the "Core" section.
   CORE_LABELS   — display labels for core metrics.
+
+CLI:
+  python3 parse_hae_payload.py export.json                # merge one file
+  python3 parse_hae_payload.py export.json --no-archive   # do not copy the raw JSON
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sys
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
 
 # Ordered by surfacing priority (Tier 1 → Tier 4). For metrics that overlap
 # with Oura (resting HR, HRV, respiratory rate), Oura is the primary source
@@ -69,8 +92,14 @@ CORE_LABELS = {
     "environmental_audio_exposure": "Environmental audio exposure",
     "headphone_audio_exposure": "Headphone audio exposure",
 }
+_LABEL_TO_NAME = {v: k for k, v in CORE_LABELS.items()}
 
 DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+
+# One writer at a time per process. The server is threaded and two HAE POSTs
+# (metrics + workouts) for the same day can land in the same second; without
+# this the second read-modify-write clobbers the first.
+_MERGE_LOCK = threading.Lock()
 
 
 def _date_from_str(s: str) -> str | None:
@@ -264,89 +293,198 @@ def _render_workout(w: dict[str, Any]) -> list[str]:
     return out
 
 
-def merge_into_existing(
-    out_dir: Path, by_day: dict[str, DayBundle], raw_archive_dir: Path | None = None
-) -> list[Path]:
-    """Write each DayBundle to its per-day markdown, merging with any prior state.
+# ---------- recovering prior state ------------------------------------------
 
-    The "merge" rule: when the new payload contains a date that already has a
-    file, parse the prior file's metrics from frontmatter (we trust ourselves)
-    and merge — but for any metric *name* present in the new payload, the new
-    points fully replace the old ones for that name. Workouts are merged by
-    workout `id` (new ones added, existing ones replaced).
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-    for date, bundle in by_day.items():
-        existing = _load_existing_bundle(out_dir, date)
-        if existing:
-            for name, pts in existing.metrics.items():
-                bundle.metrics.setdefault(name, pts)
-            existing_ids = {w.get("id") for w in bundle.workouts if w.get("id")}
-            for w in existing.workouts:
-                if w.get("id") and w["id"] in existing_ids:
-                    continue
-                bundle.workouts.append(w)
-            bundle.sources.update(existing.sources)
-        path = out_dir / f"{date}.md"
-        path.write_text(render_day_markdown(bundle), encoding="utf-8")
-        written.append(path)
-    return written
+_NUM_RE = r"-?[\d,]+(?:\.\d+)?"
+_METRIC_LINE_RE = re.compile(r"^- \*\*(?P<label>[^*]+)\*\*: (?P<value>.+)$")
+_QTY_RE = re.compile(rf"^(?P<qty>{_NUM_RE})(?: (?P<units>[^(]+?))?(?: \(sum of \d+ entries\))?$")
+_AVG_RE = re.compile(
+    rf"^avg (?P<avg>{_NUM_RE}|—)(?: (?P<units>[^(]+?))? \(min (?P<min>{_NUM_RE}|—)(?: [^/]+?)? / max (?P<max>{_NUM_RE}|—)(?: [^)]+?)?\)$"
+)
 
 
-def _load_existing_bundle(out_dir: Path, date: str) -> DayBundle | None:
-    path = out_dir / f"{date}.md"
-    if not path.exists():
-        return None
-    sidecar = out_dir / ".sidecar" / f"{date}.json"
-    if not sidecar.exists():
+def _num(s: str | None) -> float | None:
+    if s is None or s == "—":
         return None
     try:
-        d = json.loads(sidecar.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        v = float(s.replace(",", ""))
+    except ValueError:
         return None
+    return int(v) if v == int(v) else v
+
+
+def _point_from_summary(value: str) -> dict[str, Any] | None:
+    """Invert _summarize_metric_points for the shapes it emits. Lossy by design."""
+    m = _QTY_RE.match(value)
+    if m:
+        qty = _num(m.group("qty"))
+        if qty is None:
+            return None
+        return {"units": (m.group("units") or "").strip() or None, "qty": qty}
+    m = _AVG_RE.match(value)
+    if m:
+        return {
+            "units": (m.group("units") or "").strip() or None,
+            "Avg": _num(m.group("avg")),
+            "Min": _num(m.group("min")),
+            "Max": _num(m.group("max")),
+        }
+    if value.startswith("{"):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _bundle_from_markdown(path: Path, date: str) -> DayBundle:
+    """Best-effort recovery of a day's bundle from its rendered markdown.
+
+    Only used when the sidecar is missing. Metrics come back as one point each;
+    workouts keep name, start, duration, heart rate and energy. Anything the
+    renderer summarised away (per-entry points, step lists) is gone.
+    """
     bundle = DayBundle(date=date)
-    bundle.metrics = d.get("metrics", {})
-    bundle.workouts = d.get("workouts", [])
-    bundle.sources = set(d.get("sources", []))
+    text = path.read_text(encoding="utf-8")
+    fm_match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
+    fm_text, body = (fm_match.group(1), fm_match.group(2)) if fm_match else ("", text)
+    for line in fm_text.splitlines():
+        line = line.strip()
+        if line.startswith("- '") and line.endswith("'"):
+            bundle.sources.add(line[3:-1])
+
+    section = ""
+    workout: dict[str, Any] | None = None
+    for line in body.splitlines():
+        if line.startswith("## "):
+            section = line[3:].strip()
+            workout = None
+            continue
+        if section == "Workouts":
+            if line.startswith("### "):
+                workout = {"name": line[4:].strip()}
+                bundle.workouts.append(workout)
+                continue
+            m = _METRIC_LINE_RE.match(line)
+            if not (m and workout is not None):
+                continue
+            label, value = m.group("label"), m.group("value")
+            if label == "Time":
+                workout["start"] = value.split(" → ")[0].strip()
+            elif label == "Duration":
+                mins = _num(value.split(" ")[0])
+                if mins is not None:
+                    workout["duration"] = mins * 60
+            elif label == "Heart rate":
+                hr: dict[str, Any] = {}
+                for bit in value.replace(" bpm", "").split(" / "):
+                    k, _, v = bit.partition(" ")
+                    if k in ("avg", "min", "max") and _num(v) is not None:
+                        hr[k] = {"qty": _num(v)}
+                if hr:
+                    workout["heartRate"] = hr
+            elif label == "Active energy":
+                kcal = _num(value.split(" ")[0])
+                if kcal is not None:
+                    workout["activeEnergyBurned"] = {"qty": kcal}
+            continue
+        if section in ("Core", "Other metrics"):
+            m = _METRIC_LINE_RE.match(line)
+            if not m:
+                continue
+            label, value = m.group("label"), m.group("value")
+            name = _LABEL_TO_NAME.get(label, label)
+            point = _point_from_summary(value.strip())
+            if point is not None:
+                bundle.metrics[name] = [point]
     return bundle
 
 
-def write_sidecar(out_dir: Path, by_day: dict[str, DayBundle]) -> None:
+def _load_existing_bundle(out_dir: Path, date: str) -> DayBundle | None:
+    """Prior state for a date: the sidecar if present, else recovered from the markdown."""
+    md_path = out_dir / f"{date}.md"
+    sidecar = out_dir / ".sidecar" / f"{date}.json"
+    if sidecar.exists():
+        try:
+            d = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            d = None
+        if d is not None:
+            bundle = DayBundle(date=date)
+            bundle.metrics = d.get("metrics", {})
+            bundle.workouts = d.get("workouts", [])
+            bundle.sources = set(d.get("sources", []))
+            return bundle
+    if md_path.exists():
+        try:
+            return _bundle_from_markdown(md_path, date)
+        except OSError:
+            return None
+    return None
+
+
+# ---------- merging ------------------------------------------------------------
+
+def _workout_key(w: dict[str, Any]) -> str:
+    return w.get("id") or f"{w.get('start')}-{w.get('name')}"
+
+
+def merge_bundles(existing: DayBundle | None, new: DayBundle) -> DayBundle:
+    """Apply the merge rule described in the module docstring. Pure."""
+    merged = DayBundle(date=new.date)
+    merged.metrics = dict(existing.metrics) if existing else {}
+    merged.metrics.update(new.metrics)
+    workouts: dict[str, dict[str, Any]] = {}
+    for w in (existing.workouts if existing else []):
+        workouts[_workout_key(w)] = w
+    for w in new.workouts:
+        workouts[_workout_key(w)] = w
+    merged.workouts = list(workouts.values())
+    merged.sources = (existing.sources if existing else set()) | new.sources
+    return merged
+
+
+def _write_day(out_dir: Path, bundle: DayBundle) -> Path:
     sidecar_dir = out_dir / ".sidecar"
     sidecar_dir.mkdir(parents=True, exist_ok=True)
-    for date, bundle in by_day.items():
-        existing = _load_existing_bundle(out_dir, date)
-        merged_metrics = dict(existing.metrics) if existing else {}
-        merged_metrics.update(bundle.metrics)
-        merged_workouts: dict[str, dict[str, Any]] = {}
-        if existing:
-            for w in existing.workouts:
-                key = w.get("id") or f"{w.get('start')}-{w.get('name')}"
-                merged_workouts[key] = w
-        for w in bundle.workouts:
-            key = w.get("id") or f"{w.get('start')}-{w.get('name')}"
-            merged_workouts[key] = w
-        merged_sources = (existing.sources if existing else set()) | bundle.sources
-        sidecar_path = sidecar_dir / f"{date}.json"
-        sidecar_path.write_text(
-            json.dumps(
-                {
-                    "date": date,
-                    "metrics": merged_metrics,
-                    "workouts": list(merged_workouts.values()),
-                    "sources": sorted(merged_sources),
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+    (sidecar_dir / f"{bundle.date}.json").write_text(
+        json.dumps(
+            {
+                "date": bundle.date,
+                "metrics": bundle.metrics,
+                "workouts": bundle.workouts,
+                "sources": sorted(bundle.sources),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    path = out_dir / f"{bundle.date}.md"
+    path.write_text(render_day_markdown(bundle), encoding="utf-8")
+    return path
+
+
+def merge_into_existing(out_dir: Path, by_day: dict[str, DayBundle]) -> list[Path]:
+    """Merge each DayBundle into its per-day sidecar + markdown. Serialised per process."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for date, bundle in sorted(by_day.items()):
+        with _MERGE_LOCK:
+            merged = merge_bundles(_load_existing_bundle(out_dir, date), bundle)
+            written.append(_write_day(out_dir, merged))
+    return written
 
 
 def archive_raw_payload(payload: dict[str, Any], archive_dir: Path) -> Path:
+    """Copy the raw payload aside. Microsecond stamp plus a counter, so two POSTs
+    landing in the same second never overwrite each other."""
     archive_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
+    ts = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S.%f")
     out = archive_dir / f"hae-{ts}.json"
+    n = 1
+    while out.exists():
+        out = archive_dir / f"hae-{ts}-{n}.json"
+        n += 1
     out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return out
 
@@ -362,9 +500,7 @@ def ingest_payload(
     raw_path: Path | None = None
     if raw_archive_dir is not None:
         raw_path = archive_raw_payload(payload, raw_archive_dir)
-    write_sidecar(out_dir, by_day)
-    by_day_with_existing = {date: _load_existing_bundle(out_dir, date) or bundle for date, bundle in by_day.items()}
-    written = merge_into_existing(out_dir, by_day_with_existing)
+    written = merge_into_existing(out_dir, by_day)
     return {
         "dates": sorted(by_day.keys()),
         "files_written": [str(p) for p in written],
@@ -374,14 +510,30 @@ def ingest_payload(
     }
 
 
-if __name__ == "__main__":
+def main() -> int:
     import argparse
 
-    p = argparse.ArgumentParser(description="Parse one HAE JSON file → per-day markdown")
-    p.add_argument("input", type=Path, help="Path to HAE JSON file")
-    p.add_argument("--out-dir", type=Path, default=Path("knowledge/apple-health"))
-    p.add_argument("--raw-archive", type=Path, default=Path("imports/apple-health/raw"))
+    p = argparse.ArgumentParser(description="Merge one HAE JSON file into the per-day markdown + sidecar.")
+    p.add_argument("input", type=Path, help="Path to an HAE JSON export.")
+    p.add_argument("--out-dir", type=Path, default=None,
+                   help="Per-day markdown directory. Default: <data_root>/knowledge/apple-health")
+    p.add_argument("--raw-archive", type=Path, default=None,
+                   help="Where to copy the raw payload. Default: <data_root>/imports/apple-health/raw")
+    p.add_argument("--no-archive", action="store_true", help="Do not copy the raw payload anywhere.")
     args = p.parse_args()
+
+    from skill_config import data_root
+
+    out_dir = args.out_dir or data_root() / "knowledge" / "apple-health"
+    raw_dir = None if args.no_archive else (args.raw_archive or data_root() / "imports" / "apple-health" / "raw")
     payload = json.loads(args.input.read_text(encoding="utf-8"))
-    report = ingest_payload(payload, out_dir=args.out_dir, raw_archive_dir=args.raw_archive)
+    if not isinstance(payload, dict):
+        print("input is not a JSON object", file=sys.stderr)
+        return 2
+    report = ingest_payload(payload, out_dir=out_dir, raw_archive_dir=raw_dir)
     print(json.dumps(report, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

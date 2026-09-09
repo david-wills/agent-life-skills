@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified secrets resolver for OpenClaw skills and crons.
+"""Unified secrets resolver for the skills in this repo.
 
 Resolution order for `read_secret("foo")`:
 
@@ -7,15 +7,17 @@ Resolution order for `read_secret("foo")`:
        Useful for one-off testing without touching keychain/1P.
 
     2. 1Password via the `op` CLI, using the service-account token stashed in macOS Keychain
-       under service=openclaw-1password-token account=$USER.
+       under service=<prefix>-1password-token account=$USER (prefix: secrets.keychain_prefix
+       in config.json, default "agent-skills").
        Looks up `op://{vault}/{name}/{field}` using secrets.onepassword_vault and
        secrets.onepassword_field from config.json. Override the item path via
        SECRET_1P_PATH_{NAME} (upper-cased) if a secret needs a different location.
 
-    3. macOS Keychain generic password under service=openclaw-{name} account=$USER.
-       Useful for secrets we explicitly don't want in 1Password.
+    3. macOS Keychain generic password under service=<prefix>-{name} account=$USER.
+       Useful for secrets you explicitly don't want in 1Password.
 
-    4. `~/.openclaw/secrets.json` — flat {"name": "value"} map. Low-stakes fallback.
+    4. A flat {"name": "value"} JSON file: secrets.json_path in config.json, default
+       ~/.config/agent-skills/secrets.json. Low-stakes fallback.
 
 Exit codes:
     0  secret printed to stdout (no trailing newline)
@@ -49,10 +51,13 @@ except ImportError:  # standalone copy without lib/ on the path
     def _cfg(_path, default=None):
         return default
 
-DEFAULT_1P_VAULT = _cfg("secrets.onepassword_vault", "OpenClaw")
+DEFAULT_1P_VAULT = _cfg("secrets.onepassword_vault", "agent-skills")
 DEFAULT_1P_FIELD = _cfg("secrets.onepassword_field", "credential")
-SERVICE_ACCOUNT_KEYCHAIN_SERVICE = "openclaw-1password-token"
-SECRETS_JSON_PATH = Path.home() / ".openclaw" / "secrets.json"
+KEYCHAIN_PREFIX = _cfg("secrets.keychain_prefix", "agent-skills")
+SERVICE_ACCOUNT_KEYCHAIN_SERVICE = f"{KEYCHAIN_PREFIX}-1password-token"
+SECRETS_JSON_PATH = Path(
+    _cfg("secrets.json_path", "~/.config/agent-skills/secrets.json")
+).expanduser()
 
 
 class SecretError(Exception):
@@ -103,7 +108,7 @@ def _service_account_token() -> str | None:
 def _try_1password(name: str) -> str | None:
     # Cron-friendly opt-out: skip 1P entirely when set, so launchd-spawned
     # callers don't trigger op-CLI prompts/timeouts. Pair with a keychain mirror.
-    if os.environ.get("OPENCLAW_SKIP_1PASSWORD"):
+    if os.environ.get("SKILLS_SKIP_1PASSWORD"):
         return None
     if not shutil.which("op"):
         return None
@@ -145,7 +150,7 @@ def _try_keychain(name: str) -> str | None:
                 "security",
                 "find-generic-password",
                 "-s",
-                f"openclaw-{name}",
+                f"{KEYCHAIN_PREFIX}-{name}",
                 "-a",
                 getpass.getuser(),
                 "-w",
@@ -217,7 +222,7 @@ def resolve_with_source(name: str) -> tuple[str, str]:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Resolve a secret from OpenClaw's secret stores.")
+    p = argparse.ArgumentParser(description="Resolve a secret from the configured secret stores.")
     p.add_argument("name", help="Logical secret name, e.g. 'readwise'.")
     p.add_argument("--check", action="store_true", help="Print source + length to stderr; exit 0 if resolvable.")
     args = p.parse_args()

@@ -1,41 +1,40 @@
 ---
 name: structured-metrics
-description: The structured layer over the quantified-self data — populates the metrics_daily, workouts, exercise_sets and sleep_sessions tables plus the metrics_daily_resolved view in knowledge/index.db from the canonical Apple Health, Oura and Hevy files. Use when adding a metric or source, changing cross-source resolution priority, backfilling the tables, or debugging why the workout coach sees stale or missing numbers.
+description: The structured layer over the quantified-self data — populates the metrics_daily, workouts, exercise_sets and sleep_sessions tables plus the metrics_daily_resolved view in index.db from the canonical Apple Health, Oura and Hevy files. Use when adding a metric or source, changing cross-source resolution priority, backfilling the tables, or debugging why the workout coach sees stale or missing numbers.
 ---
 
 # Structured metrics
 
 ## Why it exists
 
-The knowledge base indexes prose. Three of its sources — Apple Health, Oura, Hevy —
-are not prose: they are numbers that want to be compared across days and joined
-across sources. Full-text search over a markdown rendering of a sleep score cannot
-answer "was my average HRV lower in the weeks I trained fasted."
+The local index is full-text over prose. Three of its sources — Apple Health,
+Oura, Hevy — are not prose: they are numbers that want to be compared across days
+and joined across sources. Full-text search over a markdown rendering of a sleep
+score cannot answer "was my average HRV lower in the weeks I trained fasted."
 
 So the same canonical files feed a second, structured path. This skill is that path.
 
 It has three producers (`import-apple-health`, `import-oura-data`,
 `import-hevy-workouts`) and one consumer (`workout-coach`), so it belongs beside
-none of them. It lived inside `knowledge-base` until 2026-09-08, which put a writer
-serving three importers inside a skill that mostly does full-text search. Moving it
-to `workout-coach` was considered and rejected for the mirror-image reason: that
-would put the writer inside its own reader.
+none of them. Filing it under the coach would put a writer inside its own reader;
+filing it under one importer would hide the other two producers.
 
 **This skill is the writer. `workout-coach/scripts/build_context.py` is the reader.**
 That split is the whole reason the skill exists — `build_context.py` opens
-`knowledge/index.db` and does `SELECT` only. If you are changing a table's shape,
-you are changing this skill's output *and* the coach's input, and both need to move
-together.
+`index.db` and does `SELECT` only. If you are changing a table's shape, you are
+changing this skill's output *and* the coach's input, and both need to move together.
+
+`<data_root>` below is `paths.data_root` in `config.json`, default `<repo>/_data`.
 
 ## Pieces
 
 | Piece | Path |
 | --- | --- |
 | The ingester | `scripts/ingest_metrics.py` |
-| Output | four tables + one view in `knowledge/index.db` |
+| Output | four tables + one view in `<data_root>/knowledge/index.db` |
 | Sources | `knowledge/apple-health/.sidecar/*.json`, `knowledge/oura/daily-*.md`, `knowledge/hevy/*.md` + `imports/hevy/*.json` |
 | Reader | `workout-coach/scripts/build_context.py` |
-| Crons | none of its own — invoked as a second step by three importer crons (see **The ordering contract**) |
+| Schedule | none of its own — it is step two of each importer's daily job (see **The ordering contract**) |
 
 No secrets. No network. It reads files already on disk and writes SQLite.
 
@@ -57,82 +56,88 @@ measures directly what the phone infers.
 **Consumers read the view, not the table.** Reading `metrics_daily` directly gives
 duplicate rows per date on every metric more than one device records.
 
+`workouts.date` is the **local** calendar day of `started_at`, matching the
+`Date:` line in the Hevy markdown. Hevy stores UTC; an evening session west of
+Greenwich is already tomorrow in UTC, and the day you would say you trained on is
+the local one.
+
 ## The ordering contract
 
 This is the constraint most likely to bite, and it is invisible from inside either
 skill.
 
-Three crons each run an importer's ingester and *then* this one, as sequential steps
-in a single job:
+Each source's daily job is a short sequence in your scheduler — launchd, cron, an
+agent's job runner, whatever you use — that runs the importer's ingester and
+*then* this one:
 
-| Cron | Step: FTS ingest | Step: structured ingest |
-| --- | --- | --- |
-| `hevy-daily-sync` (5:11 PT) | `import-hevy-workouts/scripts/ingest_hevy.py` | `ingest_metrics.py --source hevy --days 14` |
-| `oura-daily-sync` (5:15 PT) | `import-oura-data/scripts/ingest_oura.py` | `ingest_metrics.py --source oura --days 7` |
-| `apple-health-kb-ingest-daily` (5:35 PT) | `import-apple-health/scripts/ingest_apple_health.py` | `ingest_metrics.py --source apple-health --days 7` |
+| Source | Step 1: importer | Step 2: full-text ingest | Step 3: structured ingest |
+| --- | --- | --- | --- |
+| Hevy | `import-hevy-workouts/scripts/import_hevy_workouts.py --watermark-file …` | `import-hevy-workouts/scripts/ingest_hevy.py <newest export>` | `ingest_metrics.py --source hevy --days 14` |
+| Oura | `import-oura-data/scripts/import_oura_data.py --days 7` | `import-oura-data/scripts/ingest_oura.py <newest export>` | `ingest_metrics.py --source oura --days 7` |
+| Apple Health | (the server receives pushes; nothing to pull) | `import-apple-health/scripts/ingest_apple_health.py` | `ingest_metrics.py --source apple-health --days 7` |
 
-The second step is **gated on the first**: the cron prompt only proceeds if the
-ingester's stdout contains `ingested=`. That gate is the failure detection for the
-whole daily pipeline — a broken path surfaces at the next fire rather than days later
+Step 3 is **gated on step 2**: run it only if the ingester's stdout contains
+`ingested=`. That gate is the failure detection for the whole daily pipeline — a
+silent no-op that exits 0 is the failure that actually happens, and gating on the
+printed count means a broken path surfaces at the next fire rather than days later
 as quietly missing rows.
 
-Since the 2026-09-08 dissolution those two steps live in **different skills**, so each
-of these three crons is now a cross-skill orchestrator. That is deliberate, but it
-means: **editing a path in this skill means editing a cron prompt**, and the cron
-prompts are in the gateway's SQLite store, not on disk. `grep` will not find them.
-Use `openclaw cron list --json`.
+These jobs are not in this repo; they are three commands each, and the commands
+above are the whole spec. The cost of the gate is that a log line is now an
+interface: **editing an ingester's summary line, or a path in this skill, means
+editing the job that calls it.**
 
 ## Invariants
 
 - **Source files are canonical; SQL is regenerable.** Never edit the tables to fix a
   number — fix the source file and re-ingest. Anything reconstructable only from the
   database is a bug.
-- **Idempotent.** Re-running over the same window upserts. The overlap windows above
-  (14 days for Hevy, 7 for the others) exist so a missed run self-heals.
+- **Idempotent.** Re-running over the same window upserts in place. The overlap
+  windows above (14 days for Hevy, 7 for the others) exist so a missed run self-heals.
+- **Sets are rewritten only when the raw JSON is present.** A Hevy workout's
+  `exercise_sets` rows are cleared and re-derived only if that workout appears in a
+  file under `imports/hevy/`. If the raw export has been pruned, the workout row is
+  still refreshed from its markdown and the existing sets are left alone. (The
+  workouts upsert updates in place rather than delete-and-insert for exactly this
+  reason: a delete would cascade into the sets.)
 - **Backfill is safe.** `--all` re-derives everything from source files.
 - **Schema changes go in `SCHEMA_DDL`**, then `python3 ingest_metrics.py --all` to
   re-apply and re-backfill.
-- **`Path.home() / ".openclaw" / "workspace"`** anchors the data root — never
-  `__file__`. The script is reached through the workspace `skills/` symlink, so
-  deriving the workspace from its own location lands in the repo instead
-  (CONVENTIONS.md 4).
+- **Every path derives from `data_root()`.** Override with `--kb-root` and
+  `--imports-root` when you must; never edit a path constant.
 
 ## Operating it
 
 ```bash
-cd ~/.openclaw/workspace
-
-# what the crons run
-python3 skills/structured-metrics/scripts/ingest_metrics.py --source oura --days 7
-python3 skills/structured-metrics/scripts/ingest_metrics.py --source hevy --days 14
-python3 skills/structured-metrics/scripts/ingest_metrics.py --source apple-health --days 7
+# what the daily jobs run
+python3 quantified-self-coach/structured-metrics/scripts/ingest_metrics.py --source oura --days 7
+python3 quantified-self-coach/structured-metrics/scripts/ingest_metrics.py --source hevy --days 14
+python3 quantified-self-coach/structured-metrics/scripts/ingest_metrics.py --source apple-health --days 7
 
 # every source, last N days
-python3 skills/structured-metrics/scripts/ingest_metrics.py --days 7
+python3 quantified-self-coach/structured-metrics/scripts/ingest_metrics.py --days 7
 
 # full rebuild from source files
-python3 skills/structured-metrics/scripts/ingest_metrics.py --all
+python3 quantified-self-coach/structured-metrics/scripts/ingest_metrics.py --all
+
+# counts only, nothing written (runs against an in-memory copy of the schema)
+python3 quantified-self-coach/structured-metrics/scripts/ingest_metrics.py --all --dry-run
 ```
 
-Also accepts `--since YYYY-MM-DD`, `--kb-root`, `--imports-root`.
+Flags: `--source apple-health|oura|hevy|all` (default `all`), `--days N`,
+`--since YYYY-MM-DD`, `--all`, `--dry-run`, `--kb-root DIR` (default
+`<data_root>/knowledge`), `--imports-root DIR` (default `<data_root>/imports`).
+With no window flag it does the last 7 days.
 
-Each run prints a per-source line (`oura: metrics=…`, `hevy: workouts=…`) — that
-string is what the crons match on, so do not reformat it casually.
+Each run prints one line per source (`oura: metrics=…`, `hevy: workouts=…`). If
+your job checks that output, do not reformat it casually.
 
 Verify by artifact rather than exit code:
 
 ```bash
-sqlite3 ~/.openclaw/workspace/knowledge/index.db \
+sqlite3 <data_root>/knowledge/index.db \
   "SELECT source, MAX(date) FROM metrics_daily GROUP BY source;"
 ```
 
 If a source's max date is stale, the problem is almost always upstream in that
 source's importer — the phone stopped syncing, a token expired — not here.
-
-## Known debt
-
-The FTS5 `CREATE VIRTUAL TABLE entries` DDL is duplicated byte-identically across six
-ingest scripts, this one included. Extracting it to `lib/fts_schema.py` is a real
-cleanup, deliberately deferred out of the dissolution commit so that diff stayed
-reviewable. Note that `lib/kb_schema.py` is **already taken** by an unrelated
-entity-file contract — so do not put FTS5 DDL there.

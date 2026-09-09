@@ -1,116 +1,58 @@
 {
-  "_comment": "Copy to config.json and fill in. config.json is tracked on purpose and must hold NON-SENSITIVE deployment values only. Anything that identifies a real person, address, mailbox or third party goes in config.local.json, which is gitignored and hand-provisioned per machine (see README). Any value can also be overridden by an env var: SKILLS_<DOTTED_KEY_UPPER>, e.g. SKILLS_DISCORD_CHANNELS_READING_LIST.",
+  "_comment": "Copy to config.json and fill in the keys for the packages you run. config.json and config.local.json are both gitignored; put per-machine overrides in config.local.json. Any value can also be set as an env var: SKILLS_<DOTTED_KEY_UPPER>, e.g. SKILLS_DISCORD_CHANNELS_READING_LIST. Secrets (bot tokens, API keys) never go here; see lib/read_secret.py.",
+
   "user": {
     "display_name": "YOUR_NAME",
-    "full_name": "YOUR FULL NAME",
     "home": {
-      "_local": "LOCAL \u2014 travel-time origin. Real address never committed.",
+      "_comment": "restaurant-assistant: drive-time origin.",
       "label": "Home",
       "address": "STREET, CITY, ST ZIP",
       "lat": 0.0,
       "lng": 0.0
     }
   },
-  "secrets": {
-    "onepassword_vault": "YOUR_1PASSWORD_VAULT",
-    "onepassword_field": "credential"
+
+  "paths": {
+    "_comment": "data_root is where every skill keeps databases, imports, logs and caches. Defaults to <repo>/_data (gitignored). video_drop is the folder video-tools scans by default; a folder passed on the command line always works without it.",
+    "data_root": "",
+    "video_drop": "/path/to/your/video/drop/folder"
   },
+
+  "secrets": {
+    "_comment": "How lib/read_secret.py finds secrets after the environment: 1Password vault/field, the macOS keychain service prefix, and a flat JSON fallback.",
+    "onepassword_vault": "YOUR_1PASSWORD_VAULT",
+    "onepassword_field": "credential",
+    "keychain_prefix": "agent-skills",
+    "json_path": "~/.config/agent-skills/secrets.json"
+  },
+
   "discord": {
-    "user_id": "YOUR_DISCORD_USER_ID",
-    "bot_user_id": "YOUR_BOT_USER_ID",
-    "guild_id": "YOUR_DISCORD_GUILD_ID",
     "channels": {
-      "knowledge_hub": "CHANNEL_ID",
+      "_comment": "Numeric channel ids. Each package README says which it needs.",
+      "newsfeed": "CHANNEL_ID",
       "reading_list": "CHANNEL_ID",
-      "errors": "CHANNEL_ID",
-      "coach": "CHANNEL_ID",
-      "completed_runs": "CHANNEL_ID",
-      "applications": "CHANNEL_ID",
-      "jobs": "CHANNEL_ID",
       "restaurants": "CHANNEL_ID",
       "workouts": "CHANNEL_ID",
-      "email_digest": "CHANNEL_ID",
-      "work": "CHANNEL_ID",
-      "reels": "CHANNEL_ID",
-      "todos": "CHANNEL_ID",
-      "projects": "CHANNEL_ID",
-      "token_tracker": "000000000000000000",
-      "newsfeed": "CHANNEL_ID"
+      "token_tracker": "CHANNEL_ID",
+      "errors": "CHANNEL_ID"
     }
   },
-  "slack": {
-    "bot_user_id": "YOUR_SLACK_BOT_USER_ID",
-    "user_id": "YOUR_SLACK_USER_ID",
-    "channels": {
-      "inbox_music": "SLACK_CHANNEL_ID",
-      "inbox_restaurants": "SLACK_CHANNEL_ID",
-      "shopping_inbox": "SLACK_CHANNEL_ID",
-      "inbox_cocktails": "SLACK_CHANNEL_ID",
-      "inbox_diaries": "SLACK_CHANNEL_ID",
-      "ai_conversations": "SLACK_CHANNEL_ID",
-      "workout_dev": "SLACK_CHANNEL_ID",
-      "email_digest": "SLACK_CHANNEL_ID",
-      "work_content": "SLACK_CHANNEL_ID"
-    }
-  },
-  "workspace": {
-    "_comment": "Agent workspace directories under ~/.openclaw/workspace/. The anchor is hardcoded (CONVENTIONS.md 4); only the leaf is deployment. lib/skill_config.py work_root() reads this.",
-    "work_agent_dir": "work"
-  },
-  "token_tracker": {
-    "inbox": "/Volumes/SharedVolume/token-tracker"
-  },
-  "ticktick": {
-    "work_project_id": "TICKTICK_PROJECT_ID"
-  },
-  "_sensitive": "The keys below marked LOCAL live in config.local.json, never here. A fresh clone fails loudly on them until provisioned \u2014 that is deliberate; see lib/skill_config.py.",
+
   "accounts": {
-    "_local": "LOCAL \u2014 mailbox identities the skills authenticate as.",
+    "_comment": "restaurant-assistant: the Google account the Maps browser profile is signed into, and the account the calendar CLI authenticates as.",
     "personal": "you@example.com",
-    "shopping": "you+shopping@example.com",
-    "legacy_personal": "you+legacy@example.com",
-    "work": "you@employer.example",
-    "service": "service-account@example.com",
-    "icloud": "you@icloud.example",
-    "gcp_service": "service@PROJECT_ID.iam.gserviceaccount.com",
-    "sheets_service": "sheets-appender@PROJECT_ID.iam.gserviceaccount.com"
+    "service": "calendar-reader@example.com"
   },
-  "paths": {
-    "_local": "LOCAL \u2014 the Drive mount name embeds a work account address.",
-    "drive_root": "~/Library/CloudStorage/GoogleDrive-you@employer.example"
-  },
+
   "calendars": {
-    "_local": "LOCAL \u2014 shared calendar id.",
+    "_comment": "restaurant-assistant: the calendar the planner reads for free evenings.",
     "shared": "SHARED_CALENDAR_ID@group.calendar.google.com"
   },
-  "jira": {
-    "_local": "LOCAL \u2014 people maps PM aliases/emails to Atlassian account ids (third-party PII).",
-    "site": "yoursite.atlassian.net",
-    "default_pm": "alias",
-    "people": {
-      "alias": "ATLASSIAN_ACCOUNT_ID",
-      "person@employer.example": "ATLASSIAN_ACCOUNT_ID"
-    }
-  },
-  "mail": {
-    "_local": "LOCAL \u2014 himalaya alias -> real mailbox. Aliases are local himalaya config names, so they move with the addresses.",
-    "accounts": {
-      "alias": {
-        "email": "you@example.com",
-        "web_url": "https://mail.google.com/mail/u/0/"
-      }
-    },
-    "gmail_reauth": [
-      "you@example.com"
-    ],
-    "icloud_host": "imap.mail.me.com",
-    "icloud_port": 993,
-    "never_mark_read": [
-      "work_alias"
-    ]
-  },
-  "net": {
-    "_local": "LOCAL \u2014 Tailscale MagicDNS host of the machine running the local servers.",
-    "tailnet_host": "your-host.tailXXXXXX.ts.net"
+
+  "token_tracker": {
+    "_comment": "host labels this machine's rows; inbox is an optional drop folder where other machines leave counts-only exports; openai_prices is optional {model: [input, output]} $/MTok for Codex cost.",
+    "host": "this-mac",
+    "inbox": "",
+    "openai_prices": {}
   }
 }

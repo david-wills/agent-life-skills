@@ -2,6 +2,9 @@
 """Import recent Readwise highlights into local JSON and markdown files.
 
 Defaults to a rolling 24-hour sync using Readwise's export API.
+
+The importer and the ingester (`ingest_readwise.py`) stay two scripts on
+purpose: a failed ingest never costs you the API pull.
 """
 
 from __future__ import annotations
@@ -18,7 +21,19 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+from skill_config import data_root  # noqa: E402
+
 API_URL = "https://readwise.io/api/v2/export/"
+
+
+def default_output_dir() -> Path:
+    return data_root() / "imports" / "readwise"
 
 
 def _utc_now() -> dt.datetime:
@@ -156,7 +171,8 @@ def render_markdown(updated_after: str, synced_at: str, books: list[dict[str, An
             lines.append(f"Readwise: {first['readwise_url']}")
         lines.append("")
         for item in group:
-            lines.append(f"- {item.get('text', '').strip()}")
+            # `text` is null for some highlight kinds (e.g. image-only); never crash on it.
+            lines.append(f"- {(item.get('text') or '').strip()}")
             meta_bits: list[str] = []
             if item.get("highlighted_at"):
                 meta_bits.append(f"highlighted {item['highlighted_at']}")
@@ -175,7 +191,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Import recent Readwise highlights into local files.")
     parser.add_argument("--hours", type=float, default=24.0, help="Rolling window to import, in hours. Default: 24.")
     parser.add_argument("--since", help="ISO 8601 timestamp for updatedAfter. Overrides --hours.")
-    parser.add_argument("--output-dir", default="imports/readwise", help="Directory to write imported files into.")
+    parser.add_argument("--output-dir", default=None,
+                        help="Directory to write imported files into (default: <data_root>/imports/readwise).")
     parser.add_argument("--token", help="Readwise token. Defaults to READWISE_TOKEN or READWISE_API_TOKEN.")
     return parser.parse_args()
 
@@ -196,7 +213,7 @@ def main() -> int:
     books = fetch_books(token, updated_after)
     highlights = flatten_highlights(books)
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else default_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = _slug(synced_at)
     json_path = output_dir / f"readwise-highlights-{stamp}.json"

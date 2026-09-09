@@ -3,18 +3,21 @@
 
 Accepts one of:
 - A Google Maps URL (maps.app.goo.gl/..., google.com/maps/place/..., etc.)
-- An article URL about a restaurant (NYT, Eater, LA Times, blogs)
-- A plain restaurant name ("Bestia", "Sushi Park")
+- An article URL about a restaurant (a review site, a blog post)
+- A plain restaurant name ("Casa Invent", "Blue Heron Sushi")
 
 Strategy:
 1. Detect input type by URL host / shape.
 2. For Maps URL: navigate, extract canonical name + address from the place
    panel and capture the resulting place URL.
-3. For article URL: fetch HTML, extract candidate name(s) via og:title,
-   JSON-LD Restaurant markup, or H1 heading. Fall back to gemini if all
-   heuristics fail. Then run the name through the Maps-search path.
+3. For article URL: fetch HTML, extract candidate name(s) via JSON-LD
+   Restaurant markup, og:title, or the H1 heading — title and og tags only,
+   no LLM fallback. Then run the name through the Maps-search path.
 4. For plain name: search Maps, return up to 3 candidates with name +
    address + place URL.
+
+``resolve_in_context`` is the whole strategy against an already-open browser
+context; ``save_restaurant.py`` calls it so a save is one browser session.
 
 Output: JSON to stdout.
     {"kind": "single", "place": {name, address, url}}
@@ -30,9 +33,12 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
-from browser import maps_context
+sys.path.insert(0, str(Path(__file__).parent))
+
+from browser import maps_context  # noqa: E402
 
 MAPS_HOSTS = ("google.com/maps", "maps.google.com", "maps.app.goo.gl", "goo.gl/maps")
 ARTICLE_BLOCKLIST = ("youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com", "x.com")
@@ -130,40 +136,6 @@ def extract_from_article(article_url: str) -> list[str]:
     return out
 
 
-def gemini_extract_name(article_url: str) -> str | None:
-    """Last-resort: ask Gemini to extract the primary restaurant name from an article."""
-    import subprocess
-    try:
-        body = http_get(article_url)
-    except Exception:
-        return None
-    text = re.sub(r"<script[\s\S]*?</script>", " ", body, flags=re.IGNORECASE)
-    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", html.unescape(text)).strip()[:8000]
-    prompt = (
-        "Extract the primary restaurant name from this article. Reply with ONLY the "
-        "restaurant name, no quotes, no commentary. If the article is not about a "
-        "specific restaurant, reply with the single word NONE.\n\n"
-        f"Article text:\n{text}"
-    )
-    try:
-        r = subprocess.run(
-            ["gemini", "-p", prompt, "-m", "gemini-2.5-flash"],
-            capture_output=True,
-            text=True,
-            timeout=45,
-        )
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    name = (r.stdout or "").strip().splitlines()[-1].strip().strip('"').strip("'")
-    if not name or name.upper() == "NONE" or len(name) > 100:
-        return None
-    return name
-
-
 def maps_search(ctx, query: str, top: int = 3) -> list[dict[str, str]]:
     """Run a Google Maps search and return candidate places."""
     page = ctx.new_page()
@@ -230,7 +202,7 @@ def parse_place_page(page) -> dict[str, str] | None:
     try:
         addr_btn = page.locator('button[data-item-id="address"]').first
         address = (addr_btn.get_attribute("aria-label") or "").strip()
-        # aria-label is often "Address: 2121 E 7th Pl, Los Angeles, CA 90021"
+        # aria-label is "Address: <street>, <city>, <state> <zip>"
         address = re.sub(r"^Address:\s*", "", address)
     except Exception:
         pass
@@ -250,62 +222,52 @@ def resolve_maps_url(ctx, url: str) -> dict[str, str] | None:
     return place
 
 
+def resolve_in_context(ctx, query: str, top: int = 3) -> dict[str, Any]:
+    """Run the full resolve strategy against an open browser context."""
+    q = query.strip()
+    if not q:
+        return {"kind": "error", "error": "empty_query"}
+
+    if is_maps_url(q):
+        place = resolve_maps_url(ctx, q)
+        if place and place.get("name"):
+            return {"kind": "single", "place": place}
+        return {"kind": "error", "error": "maps_url_unresolved"}
+
+    if is_url(q):
+        if any(b in q for b in ARTICLE_BLOCKLIST):
+            return {"kind": "error", "error": "unsupported_url_host"}
+        names = extract_from_article(q)
+        if not names:
+            return {"kind": "error", "error": "no_name_extracted"}
+        # Try the best candidate first
+        results = maps_search(ctx, names[0], top=top)
+        if not results:
+            return {"kind": "error", "error": "no_maps_results", "tried": names[0]}
+        if len(results) == 1:
+            return {"kind": "single", "place": results[0], "extracted_name": names[0]}
+        return {"kind": "candidates", "candidates": results, "extracted_name": names[0]}
+
+    # Plain name
+    results = maps_search(ctx, q, top=top)
+    if not results:
+        return {"kind": "error", "error": "no_maps_results"}
+    if len(results) == 1:
+        return {"kind": "single", "place": results[0]}
+    return {"kind": "candidates", "candidates": results}
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Resolve a name, Maps URL or article URL to a Google Maps place.")
     ap.add_argument("query", help="Restaurant name, Maps URL, or article URL")
     ap.add_argument("--top", type=int, default=3, help="Max candidates to return for a name search")
     ap.add_argument("--watch", action="store_true", help="Run with a visible browser window")
     args = ap.parse_args()
 
-    q = args.query.strip()
-    if not q:
-        print(json.dumps({"kind": "error", "error": "empty_query"}))
-        return 1
-
     with maps_context(headless=not args.watch) as ctx:
-        if is_maps_url(q):
-            place = resolve_maps_url(ctx, q)
-            if place and place.get("name"):
-                print(json.dumps({"kind": "single", "place": place}))
-                return 0
-            print(json.dumps({"kind": "error", "error": "maps_url_unresolved"}))
-            return 1
-
-        if is_url(q):
-            if any(b in q for b in ARTICLE_BLOCKLIST):
-                print(json.dumps({"kind": "error", "error": "unsupported_url_host"}))
-                return 1
-            names = extract_from_article(q)
-            if not names:
-                gemini = gemini_extract_name(q)
-                if gemini:
-                    names = [gemini]
-            if not names:
-                print(json.dumps({"kind": "error", "error": "no_name_extracted"}))
-                return 1
-            # Try the best candidate first
-            results = maps_search(ctx, names[0], top=args.top)
-            if not results:
-                print(json.dumps({"kind": "error", "error": "no_maps_results", "tried": names[0]}))
-                return 1
-            payload: dict[str, Any] = (
-                {"kind": "single", "place": results[0], "extracted_name": names[0]}
-                if len(results) == 1
-                else {"kind": "candidates", "candidates": results, "extracted_name": names[0]}
-            )
-            print(json.dumps(payload))
-            return 0
-
-        # Plain name
-        results = maps_search(ctx, q, top=args.top)
-        if not results:
-            print(json.dumps({"kind": "error", "error": "no_maps_results"}))
-            return 1
-        if len(results) == 1:
-            print(json.dumps({"kind": "single", "place": results[0]}))
-        else:
-            print(json.dumps({"kind": "candidates", "candidates": results}))
-        return 0
+        result = resolve_in_context(ctx, args.query, top=args.top)
+    print(json.dumps(result))
+    return 0 if result["kind"] in ("single", "candidates") else 1
 
 
 if __name__ == "__main__":

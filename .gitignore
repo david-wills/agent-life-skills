@@ -1,5 +1,6 @@
 # Per-machine state and caches never belong in the repo.
-_state/
+_data/
+imports/
 logs/
 __pycache__/
 *.pyc
@@ -13,4 +14,3 @@ config.local.json
 *.local.json
 # Browser profiles hold cookies.
 chrome-profile/
-booking-profile/

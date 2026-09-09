@@ -12,10 +12,12 @@ full shell access to the whole machine. This reads transcripts locally and emits
 only counts. No prompts, no responses, no code, no file contents, no session ids
 ever leave the machine -- just per (day, model, project) token totals.
 
-    python3 export_aggregates.py --host studio --out ~/Desktop/studio-tokens.json
+    python3 export_aggregates.py --host laptop --out ~/Desktop/laptop-tokens.json
 
-Move the result to the tracker however you like (Taildrop, AirDrop, a copy-paste),
-then run import_aggregates.py there.
+Move the result to the machine running the tracker however you like (a shared
+folder, AirDrop, a copy-paste), then run import_aggregates.py there -- or drop it
+in the folder that machine's `token_tracker.inbox` points at and it is picked up
+on the next half-hourly sample.
 """
 import argparse
 import glob
@@ -51,6 +53,7 @@ def classify_provider(model):
     return "local"
 
 
+# The second root only exists where the OpenClaw gateway drives Codex; absent otherwise.
 CODEX_ROOTS = [
     "~/.codex/sessions",
     "~/.openclaw/agents/*/agent/codex-home",
@@ -181,14 +184,18 @@ def collect(projects_dir):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default=None, help="short label for this machine, e.g. studio")
-    ap.add_argument("--projects", default=os.path.expanduser("~/.claude/projects"))
-    ap.add_argument("--out", default=os.path.expanduser("~/Desktop/claude-tokens.json"))
+    ap = argparse.ArgumentParser(description="Summarise this machine's token usage as counts-only JSON.")
+    ap.add_argument("--host", default=None,
+                    help="short label for this machine (default: its hostname); must differ "
+                         "from token_tracker.host on the importing machine")
+    ap.add_argument("--projects", default="~/.claude/projects",
+                    help="Claude Code transcript root (default: %(default)s)")
+    ap.add_argument("--out", default="~/Desktop/claude-tokens.json",
+                    help="where to write the export (default: %(default)s)")
     ap.add_argument("--no-codex", action="store_true", help="skip Codex rollouts")
     a = ap.parse_args()
 
-    rows = collect(a.projects)
+    rows = collect(os.path.expanduser(a.projects))
     codex_rows, codex_limits = ([], None) if a.no_codex else collect_codex()
     rows += codex_rows
     doc = {

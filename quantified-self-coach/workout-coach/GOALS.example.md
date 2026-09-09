@@ -1,7 +1,8 @@
 # Workout coach goals — example
 
-Copy to `workspace/workout-coach/GOALS.md` and rewrite for yourself. That path is
-outside this repo; this file is the published template.
+Copy to `<data_root>/workout-coach/GOALS.md` and rewrite for yourself.
+`<data_root>` is `paths.data_root` in `config.json`, default `<repo>/_data`,
+which is gitignored; this file is the published template.
 
 The coach reads this before every session. It is where all the personal judgement
 lives — `SKILL.md` deliberately holds none of it, so a vague GOALS.md produces a
@@ -11,8 +12,11 @@ the briefing rather than a blocked proposal.
 
 ## Primary goal
 
-Recomposition — add lean mass while slowly losing fat. Strength is the proxy;
-scale weight is not the metric. Three lifting days a week, deliberately, not five.
+`<EDIT: one sentence. e.g. "Recomposition — add lean mass while slowly losing fat;
+strength is the proxy, scale weight is not the metric.">`
+
+Three lifting days a week, deliberately, not five. Say so here if your cadence
+differs; the coach treats the number of days as a fact, not a target to raise.
 
 ## Cadence
 
@@ -38,10 +42,14 @@ per slot rather than a single prescription.
 
 ## Secondary emphasis
 
-Bias otherwise-tied exercise picks toward carries, anti-rotation core, and paused
-squats — everyday strength qualities rather than pure hypertrophy. This is the
-"parent-prep bias" `SKILL.md` refers to; rename or delete that section if you do
-not want it.
+`<EDIT: optional. A tie-breaker for otherwise-equal exercise picks, e.g. "bias the
+unmarked slot toward carries, anti-rotation core and paused squats". Name the
+exercises from PROGRAM.md and say how often is too often. Delete this section
+if you have no such bias.>`
+
+`SKILL.md` applies whatever is written here only to the **unmarked** (new) slot of
+a session, and only as a tie-breaker: the compound lifts still come first, and the
+same tie-breaker pick is not repeated two sessions in a row.
 
 ## Out of scope
 

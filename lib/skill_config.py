@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
-"""Repo-level configuration for skills: identity, channel ids, vault names.
+"""Repo-level configuration for skills: identity, channel ids, paths.
 
-Why this exists: things like Discord channel ids, a 1Password vault name and the
-operator's display name are *deployment* facts, not source. Hardcoding them makes
-a skill unrunnable by anyone else and unpublishable without a scrub pass.
+Discord channel ids, a 1Password vault name and the operator's display name are
+deployment facts, not source. Hardcoding them makes a skill unrunnable by anyone
+else, so they live in a config file at the repo root.
 
 Resolution order for ``cfg("discord.channels.reading_list")``:
 
     1. Env var ``SKILLS_DISCORD_CHANNELS_READING_LIST`` (dots -> underscores, upper).
-       Lets a single cron or a test override one value without editing the file.
-    2. ``config.local.json`` at the repo root — gitignored, wins over config.json.
-       Put per-machine overrides or anything genuinely sensitive here.
-    3. ``config.json`` at the repo root — tracked, holds non-secret deployment
-       values (channel ids, vault *name*, display name) so a clone just works.
+       Lets a single cron or a test override one value without editing a file.
+    2. ``config.local.json`` at the repo root: gitignored, wins over config.json.
+    3. ``config.json`` at the repo root: gitignored too. Copy config.example.json
+       to it and fill in the keys the packages you run need.
     4. The ``default`` argument, if one was passed.
-    4. KeyError with a message naming the key and pointing at config.example.json.
+    5. ConfigError naming the key and pointing at config.example.json.
 
 There is deliberately no silent fallback to a baked-in id: a fresh clone should
 fail loudly with "configure this", never run against someone else's channels.
 
-    from skill_config import cfg
+    from skill_config import cfg, data_root
     channel = cfg("discord.channels.reading_list")
     name    = cfg("user.display_name", "the user")
+    db      = data_root() / "knowledge" / "index.db"
+
+Call ``cfg`` from inside ``main()`` or a function, never at module scope, so
+that ``--help`` and imports work before the config exists.
 """
 
 from __future__ import annotations
@@ -33,18 +36,22 @@ from typing import Any
 
 _MISSING = object()
 
-# Repo root is the parent of lib/. Resolve from __file__ so this works when a
-# skill is reached through the ~/.claude/skills symlink or run from any cwd.
+# Repo root is the parent of lib/. Resolved from __file__ so this works when a
+# skill is reached through a symlink or run from any cwd.
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config.json"
-LOCAL_PATH = REPO_ROOT / "config.local.json"   # gitignored; overrides config.json
+LOCAL_PATH = REPO_ROOT / "config.local.json"
 EXAMPLE_PATH = REPO_ROOT / "config.example.json"
+DEFAULT_DATA_ROOT = REPO_ROOT / "_data"
 
 _cache: dict[str, Any] | None = None
 
 
 class ConfigError(KeyError):
     """A required config key is missing."""
+
+    def __str__(self) -> str:  # KeyError quotes its message; we want it plain
+        return str(self.args[0]) if self.args else ""
 
 
 def _read(path: pathlib.Path) -> dict[str, Any]:
@@ -70,9 +77,6 @@ def _merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
 def _load() -> dict[str, Any]:
     global _cache
     if _cache is None:
-        # config.json is tracked and holds non-secret deployment values.
-        # config.local.json is gitignored and wins — put anything genuinely
-        # sensitive, or any per-machine override, there.
         _cache = _merge(_read(CONFIG_PATH), _read(LOCAL_PATH))
     return _cache
 
@@ -102,38 +106,25 @@ def cfg(path: str, default: Any = _MISSING) -> Any:
 
     raise ConfigError(
         f"missing config key {path!r}. Set {_env_name(path)} in the environment, or add it "
-        f"to {CONFIG_PATH}. Copy {EXAMPLE_PATH.name} to config.json and fill it in."
+        f"to {CONFIG_PATH} (copy {EXAMPLE_PATH.name} to config.json and fill it in)."
     )
 
 
-# ─── WORKSPACE ROOTS ─────────────────────────────────────────────────────────
-# The agent workspace anchor. CONVENTIONS.md 4 mandates this exact segmented,
-# absolute form and forbids deriving it from __file__ — after the 2026-09-03
-# symlink move, __file__ resolves into this repo rather than the workspace tree.
-WORKSPACE = pathlib.Path.home() / ".openclaw" / "workspace"
+def data_root() -> pathlib.Path:
+    """Where skills keep their databases, imported files and caches.
 
-
-def work_root() -> pathlib.Path:
-    """The work agent's workspace directory.
-
-    Sixteen scripts across nine skills used to end this path with a hardcoded
-    leaf naming an employer. Publishing any of them meant renaming that leaf — and
-    because it names a directory that actually exists and holds the live knowledge
-    base, "rename" meant moving live data on the machine that holds it, in the
-    same window as sixteen edits and a set of cron definitions.
-
-    Making the leaf a config key deletes that problem instead of scheduling it.
-    The tracked ``config.json`` names the real directory, ``config.example.json``
-    ships a generic default, and nothing on disk has to move. The next rename is
-    a one-line config edit rather than a migration.
-
-    The *anchor* stays hardcoded on purpose — only the leaf is deployment.
+    ``paths.data_root`` in config (or ``SKILLS_PATHS_DATA_ROOT``), else ``_data/``
+    at the repo root, which is gitignored. Skills derive every writable path from
+    this, so relocating all state is one config edit.
     """
-    return WORKSPACE / cfg("workspace.work_agent_dir")
+    raw = cfg("paths.data_root", None)
+    root = pathlib.Path(raw).expanduser() if raw else DEFAULT_DATA_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def reload() -> None:
-    """Drop the cache — for tests that write config.json between assertions."""
+    """Drop the cache, for tests that write config.json between assertions."""
     global _cache
     _cache = None
 

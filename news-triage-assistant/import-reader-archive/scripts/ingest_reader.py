@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Ingest a raw Readwise Reader archive JSON dump into the knowledge base.
+"""Ingest a raw Readwise Reader archive JSON dump into the local full-text index.
 
-Reads the JSON produced by `skills/import-reader-archive/scripts/import_reader_archive.py`,
-writes one markdown file per archived document under `knowledge/reader/`, and upserts
-rows into the FTS5 index at `knowledge/index.db`.
+Reads the JSON produced by `import_reader_archive.py` in this directory, writes
+one markdown file per archived document under `<kb-root>/reader/`, and upserts
+rows into the FTS5 index at `<kb-root>/index.db`.
 
-Summary source per doc:
-  - "reader"   — Reader's built-in summary (preferred when available).
-  - "claude-haiku-4-5" — generated via the Claude CLI from html_content when Reader had none.
-  - "existing" — reused from a prior generation to avoid re-spending tokens.
+Summary source per doc, recorded as `summary_source` in the frontmatter:
+  - "reader"     Reader's built-in summary (preferred when available).
+  - "<model>"    generated through the `claude` CLI from html_content when Reader
+                 had none (default model: claude-haiku-4-5).
+  - "existing"   reused from a prior ingest to avoid re-spending tokens.
 
 Idempotent: re-ingesting the same doc updates the file and FTS row in place,
 and reuses any previously-generated summary unless --regenerate is passed.
@@ -19,34 +20,35 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import re
 import sqlite3
-import subprocess
 import sys
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-import engagement
+import engagement  # noqa: E402
+from claude_cli import claude_generate  # noqa: E402
+from html_text import html_to_text  # noqa: E402
+from skill_config import data_root  # noqa: E402
 
-
-DEFAULT_KB_ROOT = Path.home() / ".openclaw" / "workspace" / "knowledge"
-
-CLAUDE_CLI = "claude"
-CLAUDE_MODEL = "claude-haiku-4-5"
+DEFAULT_MODEL = "claude-haiku-4-5"
 CLAUDE_TIMEOUT_SECONDS = 180
 
 SUMMARY_PROMPT = (
     "Write a 2-3 sentence neutral abstract of the following article. "
     "Capture the central claim or finding plus what kind of evidence/argument supports it. "
-    "Output ONLY the abstract — no preamble, no quotes, no bullet points."
+    "Output ONLY the abstract, with no preamble, no quotes, no bullet points."
 )
 
 MAX_HTML_CHARS_FOR_LLM = 60_000  # ~15k tokens, plenty for a 2-3 sentence abstract.
+
+# summary_source values that mean "we already have a usable summary on disk".
+REUSABLE_SOURCES = {"reader", "existing"}
 
 
 FTS_SCHEMA = """
@@ -70,10 +72,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
 """
 
 
-# html_to_text now lives in the repo-root lib/ so the reading-list skill can use it
-# without importing across a skill boundary (CONVENTIONS.md 2).
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2).
-from html_text import html_to_text  # noqa: E402
+def default_kb_root() -> Path:
+    return data_root() / "knowledge"
 
 
 def _slug(value: str, max_len: int = 80) -> str:
@@ -182,26 +182,13 @@ def _upsert(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     )
 
 
-def _generate_summary(text: str) -> str:
+def _generate_summary(text: str, model: str) -> str:
+    """Shell out to the `claude` CLI (via lib/claude_cli.py) for a short abstract."""
     if not text.strip():
         raise RuntimeError("empty content for summary generation")
     truncated = text[:MAX_HTML_CHARS_FOR_LLM]
-    full_prompt = SUMMARY_PROMPT + "\n\n---\n" + truncated
-    proc = subprocess.run(
-        [
-            CLAUDE_CLI,
-            "--print",
-            "--permission-mode", "bypassPermissions",
-            "--model", CLAUDE_MODEL,
-        ],
-        input=full_prompt,
-        capture_output=True,
-        text=True,
-        timeout=CLAUDE_TIMEOUT_SECONDS,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {proc.stderr.strip()}")
-    out = proc.stdout.strip()
+    out = claude_generate(SUMMARY_PROMPT + "\n\n---\n" + truncated, model=model,
+                          timeout=CLAUDE_TIMEOUT_SECONDS)
     if not out:
         raise RuntimeError("claude CLI returned empty output")
     return out
@@ -209,9 +196,10 @@ def _generate_summary(text: str) -> str:
 
 def ingest_dump(
     dump_path: Path,
-    kb_root: Path = DEFAULT_KB_ROOT,
+    kb_root: Path,
     default_status: str = "provisional",
     regenerate: bool = False,
+    model: str = DEFAULT_MODEL,
 ) -> dict[str, int]:
     payload = json.loads(dump_path.read_text(encoding="utf-8"))
     docs = payload.get("docs") or []
@@ -243,16 +231,18 @@ def ingest_dump(
 
             existing_meta, existing_body = _parse_existing_md(md_path)
             existing_source = existing_meta.get("summary_source") or ""
+            # Anything that is not Reader's own or a reuse marker was generated.
+            existing_was_generated = bool(existing_source) and existing_source not in REUSABLE_SOURCES
 
             summary: str = ""
             summary_source: str = ""
 
             reader_summary = (doc.get("summary") or "").strip()
 
-            if not regenerate and existing_body and existing_source in {"reader", "claude-haiku-4-5", "existing"}:
-                # Refresh from Reader if Reader now has a summary and we previously generated one,
-                # otherwise reuse what we have to avoid re-spending tokens.
-                if existing_source == "claude-haiku-4-5" and reader_summary:
+            if not regenerate and existing_body and existing_source:
+                # Refresh from Reader if Reader now has a summary and we previously
+                # generated one; otherwise reuse what we have to avoid re-spending tokens.
+                if existing_was_generated and reader_summary:
                     summary = reader_summary
                     summary_source = "reader"
                 else:
@@ -268,19 +258,19 @@ def ingest_dump(
                     counts["skipped_no_summary_source"] += 1
                     continue
                 try:
-                    summary = _generate_summary(text_content)
-                    summary_source = "claude-haiku-4-5"
-                except Exception as exc:
+                    summary = _generate_summary(text_content, model)
+                    summary_source = model
+                except Exception as exc:  # noqa: BLE001 - one doc must not kill the batch
                     counts["generation_failures"] += 1
                     print(f"WARN: summary gen failed for {doc_id} ({title}): {exc}", file=sys.stderr)
                     continue
 
             if summary_source == "reader":
                 counts["summary_reader"] += 1
-            elif summary_source == "claude-haiku-4-5":
-                counts["summary_generated"] += 1
-            else:
+            elif summary_source == "existing":
                 counts["summary_existing"] += 1
+            else:
+                counts["summary_generated"] += 1
 
             tags_field = doc.get("tags") or {}
             if isinstance(tags_field, dict):
@@ -351,36 +341,41 @@ def ingest_dump(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description="Ingest Reader archive JSON dumps into the local full-text index.")
     p.add_argument("dump", nargs="+", help="One or more raw Reader archive JSON dumps.")
-    p.add_argument("--kb-root", default=str(DEFAULT_KB_ROOT))
+    p.add_argument("--kb-root", default=None,
+                   help="Index root: holds index.db and reader/*.md (default: <data_root>/knowledge).")
     p.add_argument(
         "--status",
         default="provisional",
         choices=["provisional", "confirmed"],
+        help="Default status for newly ingested entries.",
     )
     p.add_argument(
         "--regenerate",
         action="store_true",
         help="Force regeneration of any existing summaries (ignores cache).",
     )
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help=f"Claude CLI model for docs Reader did not summarize (default {DEFAULT_MODEL}).")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    kb_root = Path(args.kb_root).expanduser()
+    kb_root = Path(args.kb_root).expanduser() if args.kb_root else default_kb_root()
     grand_total: dict[str, int] = {}
     for dump in args.dump:
         path = Path(dump).expanduser()
         if not path.is_file():
             print(f"skip: {path} is not a file", file=sys.stderr)
             continue
-        counts = ingest_dump(path, kb_root=kb_root, default_status=args.status, regenerate=args.regenerate)
+        counts = ingest_dump(path, kb_root=kb_root, default_status=args.status,
+                             regenerate=args.regenerate, model=args.model)
         print(f"{path}: " + " ".join(f"{k}={v}" for k, v in counts.items()))
         for k, v in counts.items():
             grand_total[k] = grand_total.get(k, 0) + v
-    print("Total: " + " ".join(f"{k}={v}" for k, v in grand_total.items()))
+    print("Total: " + " ".join(f"{k}={v}" for k, v in grand_total.items()) + f" kb_root={kb_root}")
     return 0
 
 

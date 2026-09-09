@@ -16,22 +16,22 @@ it.
 ```
 Oura ring        Hevy app        Apple Health
     │                │                │
-    │ OAuth2 pull    │ REST pull      │ HAE app POSTs over Tailscale
+    │ OAuth2 pull    │ REST pull      │ HAE app POSTs to a local server
     ▼                ▼                ▼
 import-oura-data  import-hevy-    import-apple-health
-   5:15 AM         workouts          nightly + 9 AM gap check
-                   5:11 AM
+   early AM        workouts          nightly + a 9 AM gap check
+                   early AM
     │                │                │
     └────────────────┼────────────────┘
                      ▼
         canonical markdown on disk
-     knowledge/{oura,hevy,apple-health}/
+   <data_root>/knowledge/{oura,hevy,apple-health}/
                      │
         ┌────────────┴────────────┐
         ▼                         ▼
    FTS5 index              structured-metrics
    (prose path)            runs as step 2 of each
-                           importer's own cron
+                           importer's daily job
                                   │
                                   ▼
                     metrics_daily · workouts · exercise_sets
@@ -45,7 +45,7 @@ import-oura-data  import-hevy-    import-apple-health
                  ┌────────────────┴────────────────┐
                  ▼                                 ▼
         briefing in Discord                a routine on your phone
-        Mon & Wed 1:30 PM,                 you open it at the gym,
+        on your lifting days,              you open it at the gym,
         or whenever you ask                do it, and Hevy logs it
                  │                                 │
                  └──────────► next morning's sync ◄┘
@@ -59,11 +59,11 @@ point does anyone type a number into a second place.
 
 | Skill | Runs | Does |
 | --- | --- | --- |
-| [`import-oura-data`](import-oura-data/) | 5:15 AM | Pulls workouts, daily readiness, daily sleep and detailed sleep sessions from the Oura v2 API. Writes one file per event and one per day. |
-| [`import-hevy-workouts`](import-hevy-workouts/) | 5:11 AM | Pulls full or delta workout history from Hevy, one markdown file per workout. Converts kg → lb at ingest, not at import. |
-| [`import-apple-health`](import-apple-health/) | Nightly | A stdlib HTTP server the Health Auto Export iPhone app POSTs to over Tailscale. Parses each payload into per-day markdown. A separate 9 AM job detects missing dates and pages you while HealthKit's buffer can still be re-sent. |
-| [`structured-metrics`](structured-metrics/) | Step 2 of each importer's cron | The numbers path. Re-derives four tables and a resolution view from the canonical files. |
-| [`workout-coach`](workout-coach/) | Mon & Wed 1:30 PM, or on demand | Proposes today's session — warmup plus 4-6 exercises with sets, reps and weight — from your program pools, your last fortnight of training, and this morning's recovery. Mirrors it to the phone as a Hevy routine. |
+| [`import-oura-data`](import-oura-data/) | Early morning | Pulls workouts, daily readiness, daily sleep and detailed sleep sessions from the Oura v2 API. Writes one file per event and one per day. |
+| [`import-hevy-workouts`](import-hevy-workouts/) | Early morning | Pulls full or delta workout history from Hevy, one markdown file per workout. Converts kg → lb at ingest, not at import. |
+| [`import-apple-health`](import-apple-health/) | Nightly | A stdlib HTTP server the Health Auto Export iPhone app POSTs to. Parses each payload into per-day markdown. A separate 9 AM job detects missing dates and pages you while HealthKit's buffer can still be re-sent. |
+| [`structured-metrics`](structured-metrics/) | Step 2 of each importer's job | The numbers path. Re-derives four tables and a resolution view from the canonical files. |
+| [`workout-coach`](workout-coach/) | On your lifting days, or on demand | Proposes today's session — warmup plus 4-6 exercises with sets, reps and weight — from your program pools, your last fortnight of training, and this morning's recovery. Mirrors it to the phone as a Hevy routine. |
 
 ## Ideas worth stealing
 
@@ -91,8 +91,8 @@ the writer inside the reader and made "who fills this table" unanswerable from
 the table's own directory. Same reasoning kept it out of the importers: it has
 three producers, so it belongs beside none of them.
 
-**Gate step two on step one's output, not its exit code.** Each importer's cron
-runs the ingest, then the structured re-derive — but only if the first step's
+**Gate step two on step one's output, not its exit code.** Each importer's daily
+job runs the ingest, then the structured re-derive — but only if the first step's
 stdout contained `ingested=`. A silent no-op that exits 0 is the failure mode that
 actually happens, and gating on the printed count means a broken path surfaces at
 the next fire instead of a week later as quietly missing rows. The tradeoff is
@@ -120,9 +120,10 @@ because you can read the rack in front of you and it cannot.
 **Separate the engine from the opinion.** `SKILL.md` describes how a session is
 composed and holds no view about what you should be training. `GOALS.md` and
 `PROGRAM.md` hold all of it — the split, the exercise pools, the injuries, the
-things you refuse to do. Both live outside the repo, with `.example.md` templates
-shipped in their place, for the same reason as any other personal file: an opinion
-that leaks into the prompt is one a clone inherits and cannot find to change.
+things you refuse to do. Both live under `<data_root>`, outside the tracked tree,
+with `.example.md` templates shipped in their place, for the same reason as any
+other personal file: an opinion that leaks into the prompt is one a clone
+inherits and cannot find to change.
 
 **Unfilled placeholders proceed with a heads-up.** The three fields most likely to
 be left blank — injuries, love/hate lifts, current trainer focus — are named
@@ -139,14 +140,19 @@ feels wasteful and it is load-bearing.
 ## Running it
 
 You need an Oura account with an OAuth2 app registered, a Hevy account with API
-access, an iPhone running Health Auto Export, Python 3.11+, and macOS for the
-`launchd` scheduling.
+access, an iPhone running Health Auto Export, Python 3.11+, and macOS if you want
+the shipped `launchd` templates (any scheduler works for the daily jobs).
+
+Everything the package writes lives under `<data_root>`: `paths.data_root` in
+`config.json`, default `<repo>/_data`, which is gitignored. Relocating all state
+is one config edit.
 
 ```bash
-cp config.example.json config.json
-cp workout-coach/GOALS.example.md    <workspace>/workout-coach/GOALS.md
-cp workout-coach/PROGRAM.example.md  <workspace>/workout-coach/PROGRAM.md
-python3 import-oura-data/scripts/authorize_oura.py      # one-time OAuth2 dance
+cp config.example.json config.json                     # at the repo root
+mkdir -p _data/workout-coach
+cp quantified-self-coach/workout-coach/GOALS.example.md    _data/workout-coach/GOALS.md
+cp quantified-self-coach/workout-coach/PROGRAM.example.md  _data/workout-coach/PROGRAM.md
+python3 quantified-self-coach/import-oura-data/scripts/authorize_oura.py   # one-time OAuth2 dance
 ```
 
 Then rewrite the program file. It is the coach's entire exercise vocabulary — it
@@ -161,8 +167,18 @@ authorization. Configuration resolves env var → `config.local.json` →
 `config.json`, with no baked-in fallback — a fresh clone fails loudly rather than
 running against someone else's channels.
 
-Each skill's `SKILL.md` carries its own flags, invariants and failure modes. Start
-with `--dry-run`; every stage that writes has one.
+Each skill's `SKILL.md` carries its own flags, invariants and failure modes. Every
+step that writes to the index or the phone has `--dry-run` — the three full-text
+ingesters, `ingest_metrics.py`, `gap_check.py`, `backfill_from_folder.py` and
+`push_to_hevy_routine.py`. The two API importers and the ingest server are the
+network edges and do not; run them once by hand and look at what landed.
+
+Scheduling: `import-apple-health/launchd/` ships two `.plist.template` files (the
+ingest server, kept alive; the gap check, daily at 09:00) and
+`scripts/render_launchd.py` fills them in and installs them. The three daily sync
+jobs are your scheduler's job — three commands each, listed in
+`structured-metrics/SKILL.md` — and so is the coach's proactive briefing on
+lifting days.
 
 ## Honest limits
 
@@ -170,15 +186,15 @@ with `--dry-run`; every stage that writes has one.
   the two scripts bundle context and push a routine, and an agent does the
   composing in between. Without a capable model driving it you have a context
   bundler and a Hevy client.
-- **Scheduling is macOS `launchd`, and the crons are not in this repo.** The
-  `.plist.template` files carry `{{HOME}}` and need rendering. The three daily
-  sync jobs are agent-gateway cron definitions living in a SQLite store, not
-  files — the ordering contract in `structured-metrics/SKILL.md` describes them,
-  but you will be recreating them by hand.
-- **Apple Health arrives over Tailscale or not at all.** The server listens on a
-  tailnet interface and the iPhone app pushes to it. There is no polling fallback,
-  which is exactly why the gap check exists — this is the leg that breaks, and it
-  breaks silently.
+- **The daily jobs are not in this repo.** Two launchd templates ship for the
+  Apple Health server and gap check; everything else is commands you put in your
+  own scheduler. The ordering contract in `structured-metrics/SKILL.md` is the
+  spec, and it is short.
+- **Apple Health arrives over your own network or not at all.** The server binds
+  loopback by default; you bind the interface the phone can reach (a tailnet IP
+  is the obvious one) and the iPhone app pushes to it. There is no polling
+  fallback, which is exactly why the gap check exists — this is the leg that
+  breaks, and it breaks silently.
 - **The Hevy integration is Hevy-shaped.** Exercise-template ids, rep ranges,
   routine overwrite semantics: the push script speaks one app's API and there is
   no abstraction to swap.

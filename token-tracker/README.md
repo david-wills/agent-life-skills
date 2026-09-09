@@ -13,19 +13,19 @@ do it.
 ## The loop
 
 ```
-~/.claude/projects/**/*.jsonl              the agent gateway's SQLite store
+~/.claude/projects/**/*.jsonl              the agent gateway's SQLite store (optional)
    every assistant turn carries            cron run windows, channel bindings
    a full `usage` block                              │
          │                                           │
          └──────────────┬────────────────────────────┘
-                        │  collect.py — every 30 min, incremental by byte offset
+                        │  sample.py — every 30 min: collect.py (incremental, by
+                        │  byte offset) + quota.py (one utilization sample)
                         ▼
                    tokens.db  (SQLite; the durable archive)
                         │
                         │  attribution: cron ▸ channel ▸ channel (durable) ▸ terminal
-                        │  quota.py samples the account's real utilization %
                         ▼
-                   report.py — 05:25 daily, `--yesterday`
+                   report.py — once a day, `--yesterday`
                         │
                         ▼
                 Discord #token-tracker
@@ -37,13 +37,14 @@ do it.
 
 | Script | Does |
 | --- | --- |
+| `sample.py` | The half-hourly heartbeat, and the only thing to schedule: ingest, attribute, Codex, inbox import, quota sample, reset alert. Each step isolated. |
 | `collect.py` | Ingests transcripts into SQLite and labels each session with the workflow that produced it. Safe to re-run; `INSERT OR IGNORE` on message id. |
 | `quota.py` | Takes one sample of the account's weekly utilization from the usage endpoint the `/usage` command reads. |
 | `report.py` | Prints and posts the day, the week, or a given date. `--no-post` to keep it local. |
 | `collect_codex.py` | Same for Codex (OpenAI): per-turn counts and the rate-limit block, kept in its own section. |
 | `export_aggregates.py` / `import_aggregates.py` | Counts-only transfer from another machine, so the quota denominator matches the numerator without copying transcripts. |
 | `offmachine.py` | Estimates how much quota burn is not from this machine at all. |
-| `lib.py` | Prices, schema, provider classification. |
+| `lib.py` | Prices, schema, provider classification, host label, keychain read. |
 
 ## Ideas worth stealing
 
@@ -60,9 +61,9 @@ dollars. So the tracker divides spend in the current window by the percentage
 the account reports, per monotonic segment, and the report warns when segments
 disagree. Treat `≈X% wk` as an order of magnitude. The dollar figures are exact.
 
-**A cost tracker must not cost anything.** Both schedules are launchd jobs
-running plain Python. An agent cron that burns a frontier model to report on
-model burn is self-defeating.
+**A cost tracker must not cost anything.** Both schedules are plain Python under
+launchd or cron. An agent cron that burns a frontier model to report on model
+burn is self-defeating.
 
 **Counts, not transcripts, cross machines.** The first design used an SSH key so
 one Mac could rsync another's transcripts. That grants a full shell to read a
@@ -72,15 +73,21 @@ shared folder. Same output, no access.
 **Every INSERT names its columns.** The schema gains columns over time. A
 positional insert breaks silently the moment one is added, and did.
 
+**Stop the byte offset before a half-written line.** A live transcript usually
+ends mid-record. Storing EOF as the resume point would skip that record forever
+once it completed; storing the start of the unparsed line picks it up next pass.
+
 ## Running it
 
-- Config keys: `discord.channels.token_tracker`, and optionally
-  `token_tracker.inbox` (the drop folder for other machines) and
-  `token_tracker.openai_prices` (left unset, Codex cost shows as zero rather than
-  a guessed number).
-- Schedule `collect.py` + `quota.py` every 30 minutes and `report.py --yesterday`
-  once a day, as launchd or cron. No model calls, so no agent scheduler is needed.
-- The database is plain SQLite. Ad-hoc questions are one query away:
+- Config keys: `discord.channels.token_tracker`; `token_tracker.host` (the label
+  on this machine's rows, default `this-mac`; any other machine's export must
+  use a different one); optionally `token_tracker.inbox` (a folder where other
+  machines drop counts-only exports) and `token_tracker.openai_prices` (left
+  unset, Codex cost shows as zero rather than a guessed number).
+- Schedule `sample.py` every 30 minutes and `report.py --yesterday` once a day,
+  with launchd or cron. No model calls, so no agent scheduler is needed.
+- The database is plain SQLite at `<data_root>/token-tracker/tokens.db`.
+  Ad-hoc questions are one query away:
 
 ```sql
 -- most expensive workflows over the last 7 days
@@ -93,6 +100,14 @@ WHERE m.day >= date('now','-7 days') GROUP BY 1,2 ORDER BY usd DESC;
 
 - **Claude Code prunes transcripts after about 30 days.** The database is the
   archive; history before first collection is gone. Never delete it to rebuild.
+- **Workflow attribution needs the OpenClaw gateway.** Cron and channel labels
+  come from its own state files (`~/.openclaw/state/openclaw.sqlite`,
+  `~/.openclaw/agents/*/sessions/sessions.json`). Without it every session is
+  `terminal:<project>` or `unattributed`; tokens, costs and quota still work.
+- **Quota needs a macOS keychain and a Claude Code subscription login.** The
+  utilization sample reads the OAuth token Claude Code stores when you sign in.
+  API-key users get costs but no quota percentage; `quota.py` says so in one
+  line and `sample.py` carries on without it.
 - **Utilization is account-wide; transcripts are per machine.** Use on another
   machine lands in the denominator and not the numerator, so quota shares read
   high until that machine exports its counts.

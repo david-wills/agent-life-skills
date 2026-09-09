@@ -4,6 +4,9 @@
 Defaults to a full archive backfill including HTML content so downstream
 summary generation can run without additional API calls. Pass --updated-after
 or --hours for incremental syncs.
+
+The importer and the ingester (`ingest_reader.py`) stay two scripts on
+purpose: a failed ingest never costs you the API pull.
 """
 
 from __future__ import annotations
@@ -20,8 +23,20 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+from skill_config import data_root  # noqa: E402
+
 API_URL = "https://readwise.io/api/v3/list/"
 PAGE_SLEEP_SECONDS = 0.25
+
+
+def default_output_dir() -> Path:
+    return data_root() / "imports" / "reader"
 
 
 def _utc_now() -> dt.datetime:
@@ -95,7 +110,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Import Readwise Reader archive into a local JSON dump.")
     parser.add_argument("--hours", type=float, help="Rolling window in hours (e.g. 30 for daily delta).")
     parser.add_argument("--updated-after", help="ISO 8601 timestamp for updatedAfter. Overrides --hours.")
-    parser.add_argument("--output-dir", default="imports/reader", help="Directory to write the JSON dump into.")
+    parser.add_argument("--output-dir", default=None,
+                        help="Directory to write the JSON dump into (default: <data_root>/imports/reader).")
     parser.add_argument("--no-html", action="store_true", help="Omit withHtmlContent (smaller payload, no fallback summary input).")
     parser.add_argument("--token", help="Readwise token. Defaults to READWISE_TOKEN or READWISE_API_TOKEN.")
     return parser.parse_args()
@@ -117,7 +133,7 @@ def main() -> int:
     synced_at = _iso_utc(_utc_now())
     docs = fetch_archive(token, updated_after, with_html=not args.no_html)
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else default_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = _slug(synced_at)
     json_path = output_dir / f"reader-archive-{stamp}.json"

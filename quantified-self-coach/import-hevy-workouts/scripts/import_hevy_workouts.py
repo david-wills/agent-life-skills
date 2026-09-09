@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Import workouts from the Hevy API into a local JSON dump.
 
-Defaults to a full historical pull. Pass --since <ISO> to bound the delta
-against each workout's `updated_at` field.
+Defaults to a full historical pull. Pass --since <ISO> to bound the delta:
+Hevy returns workouts newest-first by start time, and the pull stops at the
+first workout whose start_time is older than the cutoff.
 """
 
 from __future__ import annotations
@@ -18,12 +19,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2).
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
+from read_secret import SecretError, read_secret  # noqa: E402
 
 API_URL = "https://api.hevyapp.com/v1/workouts"
 PAGE_SIZE = 10  # Hevy's documented max for this endpoint.
@@ -57,21 +60,17 @@ def _slug(value: str) -> str:
     return slug or "hevy-import"
 
 
-def _token_from_env() -> str | None:
-    return os.getenv("HEVY_API_KEY") or os.getenv("HEVY_TOKEN")
-
-
-def _token_from_secret_store() -> str | None:
+def _resolve_token(cli_token: str | None) -> str:
+    tok = cli_token or os.getenv("HEVY_API_KEY") or os.getenv("HEVY_TOKEN")
+    if tok:
+        return tok
     try:
-        from read_secret import read_secret  # type: ignore[import-not-found]
-        value = read_secret("HEVY_API_KEY")
-        return value or None
-    except Exception:
-        return None
-
-
-def _resolve_token(cli_token: str | None) -> str | None:
-    return cli_token or _token_from_env() or _token_from_secret_store()
+        return read_secret("HEVY_API_KEY")
+    except SecretError as exc:
+        raise SystemExit(
+            f"Missing Hevy API key: {exc}\n"
+            "Pass --token, set HEVY_API_KEY, or store it under that name in a secret store lib/read_secret.py reads."
+        ) from exc
 
 
 def _request_json(token: str, page: int) -> dict[str, Any]:
@@ -87,8 +86,10 @@ def _request_json(token: str, page: int) -> dict[str, Any]:
 
 
 def fetch_workouts(token: str, since: dt.datetime | None) -> list[dict[str, Any]]:
-    """Fetch workouts page-by-page, newest first. Stops early if `since` is set
-    and the current page contains only workouts older than the cutoff.
+    """Fetch workouts page-by-page, newest first by start time.
+
+    With `since`, stops at the first workout whose start_time is older than the
+    cutoff. A workout without a parseable start_time is kept.
     """
     workouts: list[dict[str, Any]] = []
     page = 1
@@ -98,26 +99,22 @@ def fetch_workouts(token: str, since: dt.datetime | None) -> list[dict[str, Any]
         if not batch:
             break
 
-        if since is not None:
-            kept_any = False
+        if since is None:
+            workouts.extend(batch)
+        else:
             stop = False
             for w in batch:
-                updated_raw = w.get("updated_at") or w.get("start_time") or ""
+                started_raw = w.get("start_time") or ""
                 try:
-                    updated = _parse_iso(updated_raw) if updated_raw else None
+                    started = _parse_iso(started_raw) if started_raw else None
                 except ValueError:
-                    updated = None
-                if updated is None or updated >= since:
-                    workouts.append(w)
-                    kept_any = True
-                else:
+                    started = None
+                if started is not None and started < since:
                     stop = True
-            if stop and not kept_any:
-                break
+                    break
+                workouts.append(w)
             if stop:
                 break
-        else:
-            workouts.extend(batch)
 
         page_count = payload.get("page_count") or 0
         if page >= page_count:
@@ -129,15 +126,17 @@ def fetch_workouts(token: str, since: dt.datetime | None) -> list[dict[str, Any]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Import Hevy workouts into a local JSON dump.")
-    parser.add_argument("--since", help="ISO 8601 timestamp; only workouts updated at/after this are kept.")
-    parser.add_argument("--output-dir", default="imports/hevy", help="Directory to write the import JSON into.")
-    parser.add_argument("--token", help="Hevy API key. Defaults to HEVY_API_KEY env or 1Password.")
+    parser.add_argument("--since",
+                        help="ISO 8601 timestamp. Keep workouts whose start_time is at/after this; stop at the first older one.")
+    parser.add_argument("--output-dir", default=None,
+                        help="Directory to write the import JSON into. Default: <data_root>/imports/hevy")
+    parser.add_argument("--token", help="Hevy API key. Default: HEVY_API_KEY env, then the secret stores.")
     parser.add_argument(
         "--watermark-file",
         help=(
-            "Path to a JSON state file. If present, the prior synced_at minus 1h"
+            "Path to a JSON state file. If present, its last_synced_at minus 1h"
             " is combined (via min) with --since to produce the actual cutoff."
-            " Updated on successful run."
+            " Updated on a successful run."
         ),
     )
     return parser.parse_args()
@@ -162,12 +161,9 @@ def _read_watermark(path: Path) -> dt.datetime | None:
 def main() -> int:
     args = parse_args()
     token = _resolve_token(args.token)
-    if not token:
-        print("Missing Hevy API key. Set HEVY_API_KEY or store it in 1Password (OpenClaw vault).", file=sys.stderr)
-        return 2
 
     since = _parse_iso(args.since) if args.since else None
-    watermark_path = Path(args.watermark_file) if args.watermark_file else None
+    watermark_path = Path(args.watermark_file).expanduser() if args.watermark_file else None
     if watermark_path is not None:
         wm = _read_watermark(watermark_path)
         if wm is not None:
@@ -177,7 +173,11 @@ def main() -> int:
 
     workouts = fetch_workouts(token, since)
 
-    output_dir = Path(args.output_dir)
+    if args.output_dir:
+        output_dir = Path(args.output_dir).expanduser()
+    else:
+        from skill_config import data_root
+        output_dir = data_root() / "imports" / "hevy"
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = _slug(synced_at)
     json_path = output_dir / f"hevy-workouts-{stamp}.json"

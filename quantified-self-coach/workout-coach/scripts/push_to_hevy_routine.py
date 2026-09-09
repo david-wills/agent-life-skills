@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
-"""PUT today's workout plan into the rolling Hevy routine "Today's Workout".
+"""PUT today's workout plan into a rolling Hevy routine on the phone.
 
-The coach proposes a session in Slack; this script mirrors the same plan onto
-the phone as a Hevy routine the user can open and start. Single rolling routine
-(Option 1): we keep one routine in the account and PUT-overwrite it each
-session, so the routine list never clutters.
+The coach proposes a session in the briefing; this script mirrors the same plan
+onto the phone as a Hevy routine the user can open and start. Two rolling
+routines, one per slot — "Today's Workout — Upper Body" and "Today's Workout —
+Lower Body" — each PUT-overwritten by its own pushes, so an upper-body push
+never clobbers the lower-body plan sitting on the phone.
 
 Inputs (JSON on stdin or via --plan-file):
     {
-      "title": "Today's Workout — Mon 4/27 UB",  # optional; default auto-generated
+      "slot": "UB",                                # "UB" or "LB"; sniffed from title if absent
+      "title": "Today's Workout — Mon 4/27 UB",    # optional; default auto-generated
       "notes": "Warmup: 5 min bike + 2 light bench sets. RPE 7–8.",  # optional
       "exercises": [
         {
           "name": "Bench Press (Barbell)",            # Hevy template title
           "sets": 3,
-          "reps": "8-10",                              # range or single int
+          "reps": "8-10",                              # "8-10", "8–10", "8 to 10", or an int
           "weight_lb": 125,                            # optional
           "rest_seconds": 90,                          # optional
-          "notes": "last: 3/23, 125×9 — hold"          # optional
+          "notes": "last: 3/23, 125×9 — hold",         # optional
+          "alts": ["Chest Press (Machine)"]            # optional; first alt is mirrored
         },
         ...
       ]
     }
 
-On first run the script bootstraps:
-  - Pulls every exercise template (paginated), caches name→id at
-    workout-coach/hevy-cache/templates.json.
-  - Looks up an existing routine titled exactly "Today's Workout" — creates
-    one if missing — caches its UUID at workout-coach/hevy-cache/routine.json.
+On first run the script bootstraps a cache under <data_root>/workout-coach/hevy-cache/:
+  - templates.json   every exercise template (paginated), name → id
+  - routine_ub.json / routine_lb.json   the UUID of each slot's routine
+    (looked up by title; created with a placeholder set if missing)
+  - aliases.json     coach-friendly name → Hevy's exact title; empty by default
 
-Subsequent runs: read caches, resolve names, PUT.
-
-Aliases: workout-coach/hevy-cache/aliases.json maps coach-friendly names to
-Hevy's exact template title when they diverge. Edit freely — empty by
-default. Unresolved names abort the push and print close matches.
+Subsequent runs: read caches, resolve names, PUT. Unresolved names abort the
+push and print close matches.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ import datetime as dt
 import difflib
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -50,49 +51,57 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2).
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
+from read_secret import SecretError, read_secret  # noqa: E402
 
 API_BASE = "https://api.hevyapp.com/v1"
-ROLLING_ROUTINE_TITLE = "Today's Workout"  # legacy single-routine fallback (no slot)
+DEFAULT_TITLE_PREFIX = "Today's Workout"
 TEMPLATES_PAGE_SIZE = 100  # API documented max
 ROUTINES_PAGE_SIZE = 10
 
-WORKSPACE = Path.home() / ".openclaw" / "workspace"
-CACHE_DIR = WORKSPACE / "workout-coach" / "hevy-cache"
-TEMPLATES_PATH = CACHE_DIR / "templates.json"
-ROUTINE_PATH = CACHE_DIR / "routine.json"  # legacy single-routine cache
-ALIASES_PATH = CACHE_DIR / "aliases.json"
-
-# Slot-specific rolling routines: UB and LB each overwrite their own routine so
-# an upper-body push never clobbers the lower-body plan on the phone (and vice
-# versa). Each slot has a canonical title (used for first-run title lookup) and
-# its own ID cache file.
+# Slot-specific rolling routines. Each slot has a canonical title (used for the
+# first-run lookup) and its own ID cache file.
 SLOT_TITLES = {
     "UB": "Today's Workout — Upper Body",
     "LB": "Today's Workout — Lower Body",
 }
-SLOT_CACHE = {
-    "UB": CACHE_DIR / "routine_ub.json",
-    "LB": CACHE_DIR / "routine_lb.json",
+SLOT_CACHE_FILES = {
+    "UB": "routine_ub.json",
+    "LB": "routine_lb.json",
 }
 
 LB_PER_KG = 2.2046226218
+
+
+class Cache:
+    """Paths inside the hevy-cache directory."""
+
+    def __init__(self, cache_dir: Path) -> None:
+        self.dir = cache_dir
+        self.templates = cache_dir / "templates.json"
+        self.aliases = cache_dir / "aliases.json"
+
+    def routine(self, slot: str) -> Path:
+        return self.dir / SLOT_CACHE_FILES[slot]
 
 
 def _token() -> str:
     tok = os.getenv("HEVY_API_KEY") or os.getenv("HEVY_TOKEN")
     if tok:
         return tok
-    from read_secret import read_secret  # type: ignore[import-not-found]
-    val = read_secret("HEVY_API_KEY")
-    if not val:
-        raise SystemExit("Missing HEVY_API_KEY (env or 1Password OpenClaw vault).")
-    return val
+    try:
+        return read_secret("HEVY_API_KEY")
+    except SecretError as exc:
+        raise SystemExit(
+            f"Missing Hevy API key: {exc}\n"
+            "Set HEVY_API_KEY or store it under that name in a secret store lib/read_secret.py reads."
+        ) from exc
 
 
 def _request(method: str, path: str, token: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -126,18 +135,18 @@ def _fetch_paginated(token: str, path: str, key: str, page_size: int) -> list[di
     return items
 
 
-def load_templates(token: str, *, force_refresh: bool = False) -> dict[str, str]:
+def load_templates(token: str, cache: Cache, *, force_refresh: bool = False) -> dict[str, str]:
     """Return a name (lowercased) → exercise_template_id map.
 
     Caches the raw template list on disk; refreshes if missing or --refresh.
     """
-    if TEMPLATES_PATH.exists() and not force_refresh:
-        cached = json.loads(TEMPLATES_PATH.read_text())
+    if cache.templates.exists() and not force_refresh:
+        cached = json.loads(cache.templates.read_text())
         templates = cached.get("templates") or []
     else:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache.dir.mkdir(parents=True, exist_ok=True)
         templates = _fetch_paginated(token, "/exercise_templates", "exercise_templates", TEMPLATES_PAGE_SIZE)
-        TEMPLATES_PATH.write_text(
+        cache.templates.write_text(
             json.dumps(
                 {"fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(), "templates": templates},
                 indent=2,
@@ -148,17 +157,17 @@ def load_templates(token: str, *, force_refresh: bool = False) -> dict[str, str]
     return {t["title"].lower(): t["id"] for t in templates}
 
 
-def load_aliases() -> dict[str, str]:
-    if not ALIASES_PATH.exists():
+def load_aliases(cache: Cache) -> dict[str, str]:
+    if not cache.aliases.exists():
         return {}
-    return {k.lower(): v for k, v in json.loads(ALIASES_PATH.read_text()).items()}
+    return {k.lower(): v for k, v in json.loads(cache.aliases.read_text()).items()}
 
 
-def normalize_slot(plan: dict[str, Any]) -> str | None:
-    """Return 'UB'/'LB' for the plan's slot, or None if it can't be determined.
+def normalize_slot(plan: dict[str, Any]) -> str:
+    """Return 'UB' or 'LB' for the plan's slot.
 
-    Prefers an explicit `slot` field; falls back to sniffing the title so older
-    callers that only set a title (e.g. "… Mon 4/27 UB") still route correctly.
+    Prefers an explicit `slot` field; falls back to sniffing the title so a plan
+    that only says "… Mon 4/27 UB" still routes. Aborts if neither says.
     """
     raw = str(plan.get("slot") or "").strip().upper()
     if raw in ("UB", "UPPER", "UPPER BODY", "UPPERBODY"):
@@ -170,29 +179,19 @@ def normalize_slot(plan: dict[str, Any]) -> str | None:
         return "UB"
     if "LOWER" in title or " LB" in title or title.endswith("LB"):
         return "LB"
-    return None
-
-
-def _slot_config(slot: str | None) -> tuple[str, Path]:
-    """Map a slot to its canonical routine title + ID cache path.
-
-    Unknown/None slot falls back to the legacy single "Today's Workout" routine
-    so nothing breaks for callers that don't pass a slot.
-    """
-    if slot in SLOT_TITLES:
-        return SLOT_TITLES[slot], SLOT_CACHE[slot]
-    return ROLLING_ROUTINE_TITLE, ROUTINE_PATH
+    raise SystemExit('Plan has no slot: set "slot": "UB" or "LB" (or put UB/LB in the title).')
 
 
 def resolve_routine_id(
-    token: str, templates: dict[str, str], *, slot: str | None = None, force_refresh: bool = False
+    token: str, templates: dict[str, str], cache: Cache, *, slot: str, force_refresh: bool = False
 ) -> str:
     """Find the rolling routine for this slot, creating it if necessary.
 
     Hevy rejects empty-exercise creates, so seed with a single placeholder set
     against any template; the next push will overwrite the routine in full.
     """
-    title, cache_path = _slot_config(slot)
+    title = SLOT_TITLES[slot]
+    cache_path = cache.routine(slot)
 
     if cache_path.exists() and not force_refresh:
         cached = json.loads(cache_path.read_text())
@@ -204,7 +203,7 @@ def resolve_routine_id(
     for r in routines:
         if (r.get("title") or "").strip() == title:
             routine_id = r["id"]
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cache.dir.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps({"id": routine_id, "title": title}, indent=2) + "\n")
             return routine_id
 
@@ -233,12 +232,12 @@ def resolve_routine_id(
     if not created_routines:
         raise SystemExit(f"Routine create returned no routine object: {json.dumps(created)[:300]}")
     routine_id = created_routines[0]["id"]
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache.dir.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps({"id": routine_id, "title": title}, indent=2) + "\n")
     return routine_id
 
 
-def resolve_template(name: str, templates: dict[str, str], aliases: dict[str, str]) -> str:
+def resolve_template(name: str, templates: dict[str, str], aliases: dict[str, str], cache: Cache) -> str:
     key = name.strip().lower()
     if key in aliases:
         key = aliases[key].strip().lower()
@@ -249,7 +248,7 @@ def resolve_template(name: str, templates: dict[str, str], aliases: dict[str, st
     suggest_txt = "\n".join(f"  - {s}" for s in suggestions) if suggestions else "  (none)"
     raise SystemExit(
         f"Unknown Hevy exercise: {name!r}.\nClose matches:\n{suggest_txt}\n"
-        f"Fix the name in the plan or add an alias to {ALIASES_PATH}."
+        f"Fix the name in the plan or add an alias to {cache.aliases}."
     )
 
 
@@ -272,19 +271,25 @@ def _has_unresolved(plan: dict[str, Any], templates: dict[str, str], aliases: di
     return False
 
 
+_RANGE_RE = re.compile(r"^\s*(\d+)\s*(?:-|–|—|to)\s*(\d+)\s*$", re.IGNORECASE)
+
+
 def parse_reps(raw: str | int) -> dict[str, Any]:
     """Translate a reps spec into Hevy set fields.
 
-    Accepts int, "10", or "8-10"/"8–10"/"8 to 10". Returns a dict with
-    either {"reps": N} or {"rep_range": {"start": A, "end": B}}.
+    Accepts an int, "10", or a range written "8-10", "8–10", "8—10" or "8 to 10".
+    Returns {"reps": N} or {"rep_range": {"start": A, "end": B}}.
     """
     if isinstance(raw, int):
         return {"reps": raw}
-    text = str(raw).strip().replace("–", "-").replace("—", "-")
-    if "-" in text:
-        a, b = (s.strip() for s in text.split("-", 1))
-        return {"rep_range": {"start": int(a), "end": int(b)}}
-    return {"reps": int(text)}
+    text = str(raw).strip()
+    m = _RANGE_RE.match(text)
+    if m:
+        return {"rep_range": {"start": int(m.group(1)), "end": int(m.group(2))}}
+    try:
+        return {"reps": int(text)}
+    except ValueError:
+        raise SystemExit(f"Cannot parse reps {raw!r}: use an int, \"10\", or a range like \"8-10\".") from None
 
 
 def lb_to_kg(weight_lb: float | int | None) -> float | None:
@@ -293,7 +298,7 @@ def lb_to_kg(weight_lb: float | int | None) -> float | None:
     return round(float(weight_lb) / LB_PER_KG, 2)
 
 
-def build_payload(plan: dict[str, Any], templates: dict[str, str], aliases: dict[str, str]) -> dict[str, Any]:
+def build_payload(plan: dict[str, Any], templates: dict[str, str], aliases: dict[str, str], cache: Cache) -> dict[str, Any]:
     title = plan.get("title") or _default_title()
     notes = plan.get("notes")
     exercises_in = plan.get("exercises") or []
@@ -305,7 +310,7 @@ def build_payload(plan: dict[str, Any], templates: dict[str, str], aliases: dict
         name = ex.get("name") or ex.get("exercise")
         if not name:
             raise SystemExit(f"Exercise entry missing 'name': {ex}")
-        template_id = resolve_template(name, templates, aliases)
+        template_id = resolve_template(name, templates, aliases, cache)
         sets_count = int(ex.get("sets", 3))
         reps_fields = parse_reps(ex.get("reps", "8-10"))
         weight_kg = lb_to_kg(ex.get("weight_lb"))
@@ -341,7 +346,7 @@ def build_payload(plan: dict[str, Any], templates: dict[str, str], aliases: dict
                 alt_weight_kg = lb_to_kg(first.get("weight_lb"))
                 if alt_weight_kg is None and "weight_kg" in first:
                     alt_weight_kg = float(first["weight_kg"])
-            alt_template_id = resolve_template(alt_name, templates, aliases)
+            alt_template_id = resolve_template(alt_name, templates, aliases, cache)
             alt_set: dict[str, Any] = {"type": "normal", "weight_kg": alt_weight_kg, **reps_fields}
             out_exercises.append(
                 {
@@ -360,27 +365,27 @@ def build_payload(plan: dict[str, Any], templates: dict[str, str], aliases: dict
 
 def _default_title() -> str:
     today = dt.date.today()
-    return f"{ROLLING_ROUTINE_TITLE} — {today.strftime('%a %-m/%-d')}"
+    return f"{DEFAULT_TITLE_PREFIX} — {today.strftime('%a %-m/%-d')}"
 
 
-def push(plan: dict[str, Any], *, refresh: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def push(plan: dict[str, Any], cache: Cache, *, refresh: bool = False, dry_run: bool = False) -> dict[str, Any]:
+    slot = normalize_slot(plan)
     token = _token()
-    templates = load_templates(token, force_refresh=refresh)
-    aliases = load_aliases()
+    templates = load_templates(token, cache, force_refresh=refresh)
+    aliases = load_aliases(cache)
 
     # If any exercise name doesn't resolve against the cached template list,
     # refresh once before erroring — picks up custom Hevy exercises the user adds
     # in the app.
     if not refresh and _has_unresolved(plan, templates, aliases):
-        templates = load_templates(token, force_refresh=True)
+        templates = load_templates(token, cache, force_refresh=True)
 
-    payload = build_payload(plan, templates, aliases)
-    slot = normalize_slot(plan)
+    payload = build_payload(plan, templates, aliases, cache)
 
     if dry_run:
         return {"dry_run": True, "slot": slot, "payload": payload}
 
-    routine_id = resolve_routine_id(token, templates, slot=slot, force_refresh=refresh)
+    routine_id = resolve_routine_id(token, templates, cache, slot=slot, force_refresh=refresh)
     result = _request("PUT", f"/routines/{routine_id}", token, payload)
     return {"routine_id": routine_id, "slot": slot, "title": payload["routine"]["title"], "result": result}
 
@@ -388,36 +393,45 @@ def push(plan: dict[str, Any], *, refresh: bool = False, dry_run: bool = False) 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--plan-file", help="Path to plan JSON. Defaults to stdin.")
-    p.add_argument("--refresh", action="store_true", help="Refresh template + routine caches.")
-    p.add_argument("--dry-run", action="store_true", help="Build payload, print, but don't PUT.")
+    p.add_argument("--cache-dir", type=Path, default=None,
+                   help="Template/routine/alias cache. Default: <data_root>/workout-coach/hevy-cache")
+    p.add_argument("--refresh", action="store_true", help="Refresh template + routine caches from Hevy.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Resolve names and print the routine payload; do not PUT. Still needs the API key "
+                        "if the template cache is missing or a name does not resolve.")
     p.add_argument("--bootstrap", action="store_true", help="Just bootstrap caches and exit (no plan needed).")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.cache_dir is not None:
+        cache = Cache(args.cache_dir.expanduser())
+    else:
+        from skill_config import data_root
+        cache = Cache(data_root() / "workout-coach" / "hevy-cache")
 
     if args.bootstrap:
         token = _token()
-        templates = load_templates(token, force_refresh=args.refresh)
-        print(f"Templates cached: {len(templates)} → {TEMPLATES_PATH}")
+        templates = load_templates(token, cache, force_refresh=args.refresh)
+        print(f"Templates cached: {len(templates)} → {cache.templates}")
         for slot in ("UB", "LB"):
-            routine_id = resolve_routine_id(token, templates, slot=slot, force_refresh=args.refresh)
-            print(f"{slot} rolling routine ID: {routine_id} → {SLOT_CACHE[slot]}")
-        if not ALIASES_PATH.exists():
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            ALIASES_PATH.write_text("{}\n")
-            print(f"Created empty alias map: {ALIASES_PATH}")
+            routine_id = resolve_routine_id(token, templates, cache, slot=slot, force_refresh=args.refresh)
+            print(f"{slot} rolling routine ID: {routine_id} → {cache.routine(slot)}")
+        if not cache.aliases.exists():
+            cache.dir.mkdir(parents=True, exist_ok=True)
+            cache.aliases.write_text("{}\n")
+            print(f"Created empty alias map: {cache.aliases}")
         return 0
 
     if args.plan_file:
-        plan = json.loads(Path(args.plan_file).read_text())
+        plan = json.loads(Path(args.plan_file).expanduser().read_text())
     else:
         if sys.stdin.isatty():
             raise SystemExit("Provide --plan-file or pipe plan JSON to stdin. (Use --bootstrap to seed caches.)")
         plan = json.loads(sys.stdin.read())
 
-    summary = push(plan, refresh=args.refresh, dry_run=args.dry_run)
+    summary = push(plan, cache, refresh=args.refresh, dry_run=args.dry_run)
     if args.dry_run:
         print(f"# slot: {summary.get('slot')}")
         print(json.dumps(summary["payload"], indent=2))

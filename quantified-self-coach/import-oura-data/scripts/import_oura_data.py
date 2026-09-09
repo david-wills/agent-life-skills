@@ -5,7 +5,7 @@ Defaults to the last 90 days (initial backfill window). Pass --since YYYY-MM-DD
 or --days N to bound the delta. The script auto-refreshes the access token using
 the stored refresh token, and persists rotated tokens back to the same file.
 
-Reads tokens from ~/.openclaw/oura_tokens.json (written by authorize_oura.py).
+Reads tokens from <data_root>/oura/oura_tokens.json (written by authorize_oura.py).
 """
 
 from __future__ import annotations
@@ -23,12 +23,19 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in pathlib.Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from read_secret import SecretError, read_secret  # noqa: E402
+
 TOKEN_URL = "https://api.ouraring.com/oauth/token"
 API_BASE = "https://api.ouraring.com/v2/usercollection"
 
 COLLECTIONS = ("workout", "daily_readiness", "daily_sleep", "sleep")
-
-DEFAULT_TOKEN_FILE = pathlib.Path.home() / ".openclaw" / "oura_tokens.json"
 
 # Refresh access token if it expires within this many seconds.
 REFRESH_BUFFER_SECONDS = 5 * 60
@@ -63,15 +70,6 @@ def _urlopen_with_retry(req: urllib.request.Request, timeout: float) -> bytes:
     raise RuntimeError("unreachable")  # for type-checkers
 
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2). Walk up to find it
-# rather than hardcoding a path: skills are reached through a symlink.
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-from read_secret import read_secret, SecretError  # noqa: E402
-
-
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -94,7 +92,7 @@ def _read_tokens(path: pathlib.Path) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(
             f"Token file missing: {path}\n"
-            "Run skills/import-oura-data/scripts/authorize_oura.py first."
+            "Run import-oura-data/scripts/authorize_oura.py first."
         )
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -117,7 +115,7 @@ def _refresh_access_token(tokens: dict[str, Any], token_path: pathlib.Path) -> d
         client_id = read_secret("OURA_CLIENT_ID")
         client_secret = read_secret("OURA_CLIENT_SECRET")
     except SecretError as exc:
-        raise SystemExit(f"Missing Oura client credentials in 1P: {exc}")
+        raise SystemExit(f"Missing Oura client credentials: {exc}")
 
     body = urllib.parse.urlencode(
         {
@@ -212,15 +210,16 @@ def _request_collection(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--since", help="Start date YYYY-MM-DD (inclusive). Defaults to today − 90 days.")
     p.add_argument("--days", type=int, help="Pull last N days (today − N days through today).")
     p.add_argument("--end", help="End date YYYY-MM-DD (inclusive). Default: today (UTC).")
-    p.add_argument("--output-dir", default="imports/oura", help="Directory to write the export JSON into.")
+    p.add_argument("--output-dir", default=None,
+                   help="Directory to write the export JSON into. Default: <data_root>/imports/oura")
     p.add_argument(
         "--token-file",
-        default=str(DEFAULT_TOKEN_FILE),
-        help=f"Path to the Oura tokens JSON. Default: {DEFAULT_TOKEN_FILE}",
+        default=None,
+        help="Path to the Oura tokens JSON. Default: <data_root>/oura/oura_tokens.json",
     )
     return p.parse_args()
 
@@ -246,7 +245,10 @@ def _resolve_window(args: argparse.Namespace) -> tuple[str, str]:
 
 def main() -> int:
     args = parse_args()
-    token_path = pathlib.Path(args.token_file).expanduser()
+    from skill_config import data_root
+
+    token_path = pathlib.Path(args.token_file).expanduser() if args.token_file else data_root() / "oura" / "oura_tokens.json"
+    output_dir = pathlib.Path(args.output_dir).expanduser() if args.output_dir else data_root() / "imports" / "oura"
     start_date, end_date = _resolve_window(args)
 
     access_token = _ensure_fresh_access_token(token_path)
@@ -267,7 +269,6 @@ def main() -> int:
         total += len(items)
         print(f"  {collection}: {len(items)}")
 
-    output_dir = pathlib.Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / f"oura-data-{stamp}.json"
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

@@ -6,7 +6,7 @@ That split is the point: chunk accounting, 429 backoff and resume are
 deterministic, and deterministic work does not belong in a prompt where it is
 re-derived (and re-broken) on every run.
 
-Input is a JSON array of message strings — header first, then one per section,
+Input is a JSON array of message strings, header first, then one per section,
 in send order.
 
     python3 post_digest.py --messages /tmp/digest.json --dry-run
@@ -25,27 +25,21 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2). Walk up to find
-# it rather than hardcoding a path: skills are reached through a symlink.
-_LIB = next(p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-import socratic_common as sc  # noqa: E402
-from skill_config import cfg  # noqa: E402
-
-DISCORD_API = "https://discord.com/api/v10"
-
-# .resolve() matters: this skill is reached through a symlink, so without it
-# _state/ lands next to the symlink instead of in the repo (CONVENTIONS.md 1).
-STATE_DIR = Path(__file__).resolve().parent.parent / "_state"
-PROGRESS_FILE = STATE_DIR / "last_run.json"
+from discord import DISCORD_API, SUPPRESS_EMBEDS, get_discord_token  # noqa: E402
+from skill_config import cfg, data_root  # noqa: E402
 
 # Discord's hard cap is 2000. The prompt targets 1900 so a section that grows a
 # few characters between drafting and posting still fits.
 HARD_LIMIT = 2000
 
 # ~20-25 messages per digest exceeds Discord's per-channel burst allowance, so
-# pacing is not optional — without it the run reliably half-posts.
+# pacing is not optional; without it the run reliably half-posts.
 SEND_INTERVAL = 1.2
 RETRY_AFTER_CAP = 60
 NON_429_RETRY_WAIT = 30
@@ -53,15 +47,19 @@ MAX_429_ATTEMPTS = 6
 
 
 def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description="Post a composed digest to Discord with pacing, 429 backoff and resume.")
     ap.add_argument("--messages", required=True,
                     help="JSON file holding an array of message strings, in send order")
     ap.add_argument("--channel", default=None,
-                    help="Discord channel id (default: discord.channels.newsfeed)")
+                    help="Discord channel id (default: discord.channels.newsfeed from config.json)")
     ap.add_argument("--dry-run", action="store_true",
                     help="validate and report, send nothing")
     ap.add_argument("--resume", action="store_true",
                     help="continue the last run instead of starting from the top")
+    ap.add_argument("--no-state", action="store_true",
+                    help="neither read nor write the resume record; for one-off notices "
+                         "(e.g. a failure post to the errors channel) that must not clobber "
+                         "a half-posted digest's progress")
     return ap.parse_args()
 
 
@@ -77,9 +75,9 @@ def load_messages(path: str) -> list[str]:
 def validate(messages: list[str]) -> list[dict]:
     """Every message is checked before any is sent.
 
-    The old inline version validated as it went, so an over-length section 18
-    aborted a run that had already posted 17 messages — leaving a truncated
-    digest in the channel and no clean way to finish it.
+    Validating as it went meant an over-length section 18 aborted a run that
+    had already posted 17 messages, leaving a truncated digest in the channel
+    and no clean way to finish it.
     """
     return [
         {"index": i, "chars": len(m), "preview": m.splitlines()[0][:60]}
@@ -91,30 +89,35 @@ def validate(messages: list[str]) -> list[dict]:
 # ---------- progress ------------------------------------------------------
 
 
-def read_progress() -> dict:
+def progress_file() -> Path:
+    """Where the last run's position is recorded: <data_root>/morning-news/last_run.json."""
+    return data_root() / "morning-news" / "last_run.json"
+
+
+def read_progress(path: Path) -> dict:
     """Absent or corrupt progress means "start from the top", never a traceback.
 
-    A fresh clone has no _state/, and a half-written file is likelier than usual
+    A fresh clone has no state, and a half-written file is likelier than usual
     here precisely because this script runs during failures.
     """
     try:
-        return json.loads(PROGRESS_FILE.read_text())
+        return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
 
 
-def write_progress(data: dict) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    PROGRESS_FILE.write_text(json.dumps(data, indent=2))
+def write_progress(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
 
 
-def resume_index(messages: list[str], channel: str) -> int:
+def resume_index(path: Path, messages: list[str], channel: str) -> int:
     """Where to pick up, or 0 if the recorded run doesn't match this one.
 
     Keyed on message count and channel so resuming a *different* digest can't
     silently skip its first N sections.
     """
-    prog = read_progress()
+    prog = read_progress(path)
     if prog.get("channel") != channel or prog.get("total") != len(messages):
         return 0
     return int(prog.get("posted") or 0)
@@ -124,9 +127,15 @@ def resume_index(messages: list[str], channel: str) -> int:
 
 
 def post_one(channel: str, text: str, token: str) -> None:
+    """One message, with Discord's own retry_after honoured on a 429.
+
+    This deliberately does not go through lib/discord.py's discord_request:
+    that helper flattens a 429 into an exception message, and this script
+    needs the structured retry_after value out of the response body.
+    """
     body = json.dumps({
         "content": text,
-        "flags": 4,  # SUPPRESS_EMBEDS — 25 link previews would bury the digest
+        "flags": SUPPRESS_EMBEDS,  # 25 link previews would bury the digest
         "allowed_mentions": {"parse": []},
     }).encode("utf-8")
 
@@ -137,7 +146,7 @@ def post_one(channel: str, text: str, token: str) -> None:
             headers={
                 "Authorization": f"Bot {token}",
                 "Content-Type": "application/json; charset=utf-8",
-                "User-Agent": "OpenClaw morning-news",
+                "User-Agent": "DiscordBot (agent-life-skills morning-news, 1.0)",
             },
         )
         try:
@@ -161,6 +170,13 @@ def main() -> int:
     args = parse_args()
     messages = load_messages(args.messages)
     channel = args.channel or cfg("discord.channels.newsfeed")
+    if args.no_state and args.resume:
+        raise SystemExit("--no-state and --resume contradict each other")
+    progress = progress_file()
+
+    def save(data: dict) -> None:
+        if not args.no_state:
+            write_progress(progress, data)
 
     oversized = validate(messages)
     if oversized:
@@ -169,7 +185,7 @@ def main() -> int:
                           "oversized": oversized}, indent=2))
         return 1
 
-    start = resume_index(messages, channel) if args.resume else 0
+    start = resume_index(progress, messages, channel) if args.resume else 0
 
     if args.dry_run:
         print(json.dumps({
@@ -179,7 +195,7 @@ def main() -> int:
         }, indent=2))
         return 0
 
-    token = sc.get_discord_token()
+    token = get_discord_token()
     run = {
         "channel": channel,
         "total": len(messages),
@@ -195,7 +211,7 @@ def main() -> int:
             try:
                 post_one(channel, messages[i], token)
             except Exception as exc2:  # noqa: BLE001
-                write_progress(run)
+                save(run)
                 print(json.dumps({
                     "ok": False, "stage": "post", "failed_at": i,
                     "posted": run["posted"], "total": len(messages),
@@ -205,12 +221,12 @@ def main() -> int:
                 }, indent=2))
                 return 1
         run["posted"] = i + 1
-        write_progress(run)
+        save(run)
         if i + 1 < len(messages):
             time.sleep(SEND_INTERVAL)
 
     run["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
-    write_progress(run)
+    save(run)
     print(json.dumps({"ok": True, "channel": channel,
                       "posted": run["posted"], "total": len(messages),
                       "resumed_from": start if start else None}, indent=2))

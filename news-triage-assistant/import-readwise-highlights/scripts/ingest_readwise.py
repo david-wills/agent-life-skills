@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Ingest a raw Readwise export JSON file into the knowledge base.
+"""Ingest a raw Readwise export JSON file into the local full-text index.
 
-Reads the JSON produced by `skills/import-readwise-highlights/scripts/import_readwise_highlights.py`,
-writes per-highlight markdown files under `knowledge/readwise/<book_slug>/<highlight_id>.md`,
-and upserts rows into the FTS5 index at `knowledge/index.db`.
+Reads the JSON produced by `import_readwise_highlights.py` in this directory,
+writes per-highlight markdown files under `<kb-root>/readwise/<book_slug>/<highlight_id>.md`,
+and upserts rows into the FTS5 index at `<kb-root>/index.db`.
 
 Idempotent: re-ingesting the same highlight updates the file and index row in place.
 """
@@ -18,15 +18,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2).
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-import engagement
-
-
-DEFAULT_KB_ROOT = Path.home() / ".openclaw" / "workspace" / "knowledge"
+import engagement  # noqa: E402
+from skill_config import data_root  # noqa: E402
 
 
 FTS_SCHEMA = """
@@ -48,6 +47,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
     tokenize = 'unicode61 remove_diacritics 2'
 );
 """
+
+
+def default_kb_root() -> Path:
+    return data_root() / "knowledge"
 
 
 def _slug(value: str, max_len: int = 80) -> str:
@@ -145,7 +148,7 @@ def _upsert(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
 
 def ingest_export(
     export_path: Path,
-    kb_root: Path = DEFAULT_KB_ROOT,
+    kb_root: Path,
     default_status: str = "provisional",
 ) -> tuple[int, int]:
     """Ingest a single Readwise export JSON file. Returns (written_count, skipped_count)."""
@@ -268,12 +271,12 @@ def ingest_export(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description="Ingest Readwise export JSON files into the local full-text index.")
     p.add_argument("export", nargs="+", help="One or more raw Readwise export JSON files.")
     p.add_argument(
         "--kb-root",
-        default=str(DEFAULT_KB_ROOT),
-        help=f"Knowledge base root directory. Default: {DEFAULT_KB_ROOT}",
+        default=None,
+        help="Index root: holds index.db and readwise/**/*.md (default: <data_root>/knowledge).",
     )
     p.add_argument(
         "--status",
@@ -286,7 +289,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    kb_root = Path(args.kb_root).expanduser()
+    kb_root = Path(args.kb_root).expanduser() if args.kb_root else default_kb_root()
     total_written = 0
     total_skipped = 0
     for export in args.export:

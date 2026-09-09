@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Ingest a raw Oura export JSON file into the knowledge base.
+"""Ingest a raw Oura export JSON file into the local index.
 
-Reads the JSON produced by `skills/import-oura-data/scripts/import_oura_data.py`,
-writes two flavors of markdown under `knowledge/oura/`:
+Reads the JSON produced by `import_oura_data.py` and writes two flavors of
+markdown under `<data_root>/knowledge/oura/`:
 
   - workout-<id>.md   — one per workout event (cardio, walks, lifts, etc.)
   - daily-<date>.md   — one per day, combining readiness + daily sleep score
                         + main long_sleep session (HRV, RHR, total sleep, etc.)
 
-Both are upserted into the FTS5 index at `knowledge/index.db` under source="oura".
+Both are upserted into the FTS5 index at `<data_root>/knowledge/index.db` under source="oura".
 
 Idempotent: re-ingesting the same export updates files and index rows in place.
 """
@@ -23,8 +23,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
-DEFAULT_KB_ROOT = Path.home() / ".openclaw" / "workspace" / "knowledge"
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
 
 
 FTS_SCHEMA = """
@@ -111,10 +115,13 @@ def _frontmatter(meta: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _ensure_db(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA journal_mode=WAL")
+def _ensure_db(db_path: Path | None) -> sqlite3.Connection:
+    if db_path is None:
+        conn = sqlite3.connect(":memory:")
+    else:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(FTS_SCHEMA)
     return conn
 
@@ -430,8 +437,9 @@ def render_daily_markdown(
 
 def ingest_export(
     export_path: Path,
-    kb_root: Path = DEFAULT_KB_ROOT,
+    kb_root: Path,
     default_status: str = "confirmed",
+    dry_run: bool = False,
 ) -> tuple[int, int]:
     payload = json.loads(export_path.read_text(encoding="utf-8"))
 
@@ -442,8 +450,9 @@ def ingest_export(
 
     ingested_at = _iso_utc_now()
     out_root = kb_root / "oura"
-    out_root.mkdir(parents=True, exist_ok=True)
-    conn = _ensure_db(kb_root / "index.db")
+    if not dry_run:
+        out_root.mkdir(parents=True, exist_ok=True)
+    conn = _ensure_db(None if dry_run else kb_root / "index.db")
     written = 0
     skipped = 0
 
@@ -482,7 +491,10 @@ def ingest_export(
                 "tags": derived["tags"],
             }
             doc = _frontmatter(meta) + "\n\n" + body
-            md_path.write_text(doc.rstrip() + "\n", encoding="utf-8")
+            if dry_run:
+                print(f"would write {md_path.name}: {meta['title']}")
+            else:
+                md_path.write_text(doc.rstrip() + "\n", encoding="utf-8")
             _upsert(conn, {
                 "id": meta["id"],
                 "source": meta["source"],
@@ -543,7 +555,10 @@ def ingest_export(
                 "tags": derived["tags"],
             }
             doc = _frontmatter(meta) + "\n\n" + body
-            md_path.write_text(doc.rstrip() + "\n", encoding="utf-8")
+            if dry_run:
+                print(f"would write {md_path.name}: {meta['title']}")
+            else:
+                md_path.write_text(doc.rstrip() + "\n", encoding="utf-8")
             _upsert(conn, {
                 "id": meta["id"],
                 "source": meta["source"],
@@ -570,16 +585,21 @@ def ingest_export(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("export", nargs="+", help="One or more raw Oura export JSON files.")
-    p.add_argument("--kb-root", default=str(DEFAULT_KB_ROOT), help=f"Knowledge base root. Default: {DEFAULT_KB_ROOT}")
+    p.add_argument("--kb-root", default=None, help="Index root. Default: <data_root>/knowledge")
     p.add_argument("--status", default="confirmed", choices=["provisional", "confirmed"], help="Default status.")
+    p.add_argument("--dry-run", action="store_true", help="List what would be written; write nothing.")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    kb_root = Path(args.kb_root).expanduser()
+    if args.kb_root:
+        kb_root = Path(args.kb_root).expanduser()
+    else:
+        from skill_config import data_root
+        kb_root = data_root() / "knowledge"
     total_written = 0
     total_skipped = 0
     for export in args.export:
@@ -587,11 +607,12 @@ def main() -> int:
         if not export_path.is_file():
             print(f"skip: {export_path} is not a file", file=sys.stderr)
             continue
-        written, skipped = ingest_export(export_path, kb_root=kb_root, default_status=args.status)
+        written, skipped = ingest_export(export_path, kb_root=kb_root, default_status=args.status, dry_run=args.dry_run)
         print(f"{export_path}: ingested={written} skipped={skipped}")
         total_written += written
         total_skipped += skipped
-    print(f"Total: ingested={total_written} skipped={total_skipped} kb_root={kb_root}")
+    prefix = "dry-run " if args.dry_run else ""
+    print(f"{prefix}Total: ingested={total_written} skipped={total_skipped} kb_root={kb_root}")
     return 0
 
 

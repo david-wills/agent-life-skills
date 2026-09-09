@@ -10,7 +10,16 @@ Attribution joins those sessions back to the workflow that caused them:
   1. cron   -- openclaw.sqlite cron_run_logs, matched by run time window + model
   2. channel-- agents/*/sessions/sessions.json claudeCliSessionId -> session key
   3. terminal -- entrypoint=cli
+
+Steps 1-2 read the OpenClaw gateway's own state and are skipped when it is not
+installed; every session then resolves to terminal:<project> or unattributed.
+
+Usage:
+  collect.py                  # incremental ingest + attribute new sessions
+  collect.py --reattribute    # drop every label and rebuild them (after rule changes)
+  collect.py --quiet          # no progress lines (what sample.py wants)
 """
+import argparse
 import glob
 import json
 import re
@@ -39,25 +48,10 @@ def day_of(ms):
     return datetime.fromtimestamp(ms / 1000, timezone.utc).astimezone(PT).strftime("%Y-%m-%d")
 
 
-def synced_hosts():
-    """Other machines whose raw transcripts have been staged locally.
-
-    Unused in the shipped setup -- other machines send counts-only exports via the
-    shared drop folder instead (see import_aggregates.watch). Kept because the
-    ingest path is provider-agnostic and costs nothing when the directory is
-    absent; the SSH transport that used to fill it was removed deliberately.
-    """
-    root = lib.STATE / "hosts"
-    if not root.is_dir():
-        return []
-    return [(d.name, str(d / "projects")) for d in sorted(root.iterdir())
-            if (d / "projects").is_dir()]
-
-
 def ingest(con, verbose=False, root=None, host=None):
     """Incrementally read every transcript, inserting assistant messages with usage."""
     root = root or lib.CLAUDE_PROJECTS
-    host = host or lib.LOCAL_HOST
+    host = host or lib.local_host()
     seen = {r[0]: (r[1], r[2], r[3]) for r in con.execute("SELECT path,size,mtime,offset FROM files")}
     new_rows = 0
     files_touched = 0
@@ -83,17 +77,34 @@ def ingest(con, verbose=False, root=None, host=None):
         # A single API response is written as one record per content block, each
         # repeating the SAME usage object. Counting records instead of calls
         # inflated every figure ~2.4x. requestId identifies the actual call.
+        # Resuming mid-file, seed from what is already stored so a call whose
+        # first block landed on the previous pass is not counted again.
         seen_requests = set()
+        if offset:
+            seen_requests = {r[0] for r in con.execute(
+                "SELECT request_id FROM messages WHERE session_id=? AND request_id IS NOT NULL",
+                (session_id,))}
+        new_offset = offset
         try:
-            with open(path, "r", errors="replace") as fh:
+            # Binary mode so byte offsets are exact. A live transcript usually ends
+            # in a half-written line: stop at the START of any line that has no
+            # newline yet, so the next pass re-reads it whole. Storing EOF here
+            # would skip that line forever once it completed.
+            with open(path, "rb") as fh:
                 fh.seek(offset)
-                for line in fh:
-                    if '"usage"' not in line:
+                while True:
+                    raw = fh.readline()
+                    if not raw:
+                        break
+                    if not raw.endswith(b"\n"):
+                        break                 # partial trailing line; offset stays before it
+                    new_offset += len(raw)
+                    if b'"usage"' not in raw:
                         continue
                     try:
-                        d = json.loads(line)
+                        d = json.loads(raw.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
-                        continue              # partial trailing line; offset stops before it
+                        continue              # a complete but corrupt line; skip it
                     if d.get("type") != "assistant":
                         continue
                     msg = d.get("message") or {}
@@ -127,41 +138,37 @@ def ingest(con, verbose=False, root=None, host=None):
                         inp, out, cr, cw5, cw1, think,
                         lib.cost_usd(model, inp, out, cr, cw5, cw1), host, req,
                     ))
-                new_offset = fh.tell()
         except OSError:
             continue
 
         if rows:
+            before = con.total_changes
             con.executemany(
                 """INSERT OR IGNORE INTO messages
                    (uuid, session_id, project, ts, day, model, entrypoint, is_sidechain,
                     input_tokens, output_tokens, cache_read, cache_write_5m,
                     cache_write_1h, thinking_tokens, cost_usd, host, request_id)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
-            new_rows += con.total_changes and len(rows) or 0
+            new_rows += con.total_changes - before
         con.execute("INSERT OR REPLACE INTO files (path, size, mtime, offset) VALUES (?,?,?,?)",
                     (path, st.st_size, st.st_mtime, new_offset))
         files_touched += 1
 
     con.commit()
     if verbose:
-        print(f"ingest[{host}]: {files_touched} files touched, {new_rows} message rows offered")
+        print(f"ingest[{host}]: {files_touched} files touched, {new_rows} new message rows")
     return files_touched
 
 
-def ingest_all(con, verbose=False):
-    """Local transcripts plus every host synced in from elsewhere."""
-    n = ingest(con, verbose)
-    for host, root in synced_hosts():
-        n += ingest(con, verbose, root=root, host=host)
-    return n
-
-
 def load_cron_runs():
-    """Every cron run OpenClaw has logged, with its job name."""
-    if not os.path.exists(lib.OPENCLAW_STATE_DB):
+    """Every cron run OpenClaw has logged, with its job name. Empty without OpenClaw."""
+    db = lib.openclaw_paths()["state_db"]
+    if not os.path.exists(db):
         return []
-    con = sqlite3.connect(f"file:{lib.OPENCLAW_STATE_DB}?mode=ro", uri=True, timeout=20)
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=20)
+    except sqlite3.Error:
+        return []
     try:
         rows = con.execute("""
             SELECT r.job_id, COALESCE(j.name, r.job_id), r.run_at_ms, r.ts, r.model, r.session_key
@@ -184,9 +191,12 @@ def load_cron_runs():
 
 
 def load_channel_map():
-    """claude-cli session id -> (agent, human label) from every agent's sessions.json."""
+    """claude-cli session id -> (agent, human label) from every agent's sessions.json.
+
+    Empty when OpenClaw is not installed; glob on a missing directory yields nothing.
+    """
     out = {}
-    for sj in glob.glob(os.path.join(lib.OPENCLAW_AGENTS, "*", "sessions", "sessions.json")):
+    for sj in glob.glob(os.path.join(lib.openclaw_paths()["agents"], "*", "sessions", "sessions.json")):
         agent = sj.split("/agents/")[1].split("/")[0]
         try:
             data = json.load(open(sj))
@@ -278,7 +288,7 @@ def prettify(label):
 def load_gid_names():
     """Discord/Slack group id -> friendly '#channel' name, from every sessions.json."""
     names = {}
-    for sj in glob.glob(os.path.join(lib.OPENCLAW_AGENTS, "*", "sessions", "sessions.json")):
+    for sj in glob.glob(os.path.join(lib.openclaw_paths()["agents"], "*", "sessions", "sessions.json")):
         try:
             data = json.load(open(sj))
         except (OSError, json.JSONDecodeError):
@@ -321,6 +331,7 @@ def attribute(con, verbose=False, reset=False):
     crons = load_cron_runs()
     chan = load_channel_map()
     gid_names = load_gid_names()
+    local = lib.local_host()
 
     # bucket cron runs by minute so lookup stays linear
     starts = [c["start"] for c in crons]
@@ -332,9 +343,9 @@ def attribute(con, verbose=False, reset=False):
             "SELECT DISTINCT model FROM messages WHERE session_id=?", (sid,))}
 
         # OpenClaw only runs on the local machine, so cron and channel joins are
-        # meaningless for a synced host -- a Studio session that merely overlaps a
-        # local cron window would otherwise be labelled as that cron.
-        remote = host != lib.LOCAL_HOST
+        # meaningless for rows imported from another host -- a remote session that
+        # merely overlaps a local cron window would otherwise be labelled as that cron.
+        remote = host != local
 
         # 1) cron: session must start inside a run window AND finish by the time
         #    that run finished (isolated cron sessions satisfy both; a long-lived
@@ -369,7 +380,8 @@ def attribute(con, verbose=False, reset=False):
             rows.append((sid, host, "channel", label, None, None, "chat_id", "high"))
             continue
 
-        # 4) the user driving Claude Code directly
+        # 4) the user driving Claude Code directly. With no OpenClaw state this is
+        #    where every interactive session lands.
         if entry == "cli" or remote:
             rows.append((sid, host, "terminal", f"terminal:{short_project(project)}",
                          None, None, "entrypoint", "high"))
@@ -389,11 +401,16 @@ def attribute(con, verbose=False, reset=False):
 
 
 def main():
-    verbose = "--quiet" not in sys.argv
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--reattribute", action="store_true",
+                    help="delete every attribution row and relabel all sessions")
+    ap.add_argument("--quiet", action="store_true", help="suppress progress output")
+    a = ap.parse_args()
+    verbose = not a.quiet
     con = lib.connect()
     lib.init(con)
-    ingest_all(con, verbose)
-    attribute(con, verbose, reset="--reattribute" in sys.argv)
+    ingest(con, verbose)
+    attribute(con, verbose, reset=a.reattribute)
     if verbose:
         n, lo, hi = con.execute(
             "SELECT COUNT(*), MIN(day), MAX(day) FROM messages").fetchone()

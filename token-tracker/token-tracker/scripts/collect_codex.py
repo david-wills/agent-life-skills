@@ -6,13 +6,17 @@ per-turn `last_token_usage` counts and a `rate_limits` block with 5-hour and
 weekly used_percent. Structurally the same shape as Claude transcripts plus the
 OAuth usage endpoint -- just already in one file.
 
-Three roots, because Codex-under-OpenClaw does not share the CLI's home:
+Two roots, because Codex driven by the OpenClaw gateway does not share the CLI's home:
   ~/.codex/sessions                          the user's own terminal Codex
-  ~/.openclaw/agents/*/agent/codex-home      each agent's ACP sessions
+  <openclaw agents>/*/agent/codex-home       each agent's ACP sessions (absent without OpenClaw)
 
 Cost is only computed when token_tracker.openai_prices is configured; otherwise
 rows carry tokens and quota but no dollars, rather than invented ones.
+
+Usage:
+  collect_codex.py            # ingest new rollouts and print the totals
 """
+import argparse
 import glob
 import json
 import os
@@ -25,10 +29,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib
 
 PT = ZoneInfo("America/Los_Angeles")
-ROOTS = [
-    (os.path.expanduser("~/.codex/sessions"), "terminal"),
-    (os.path.expanduser("~/.openclaw/agents/*/agent/codex-home"), "openclaw"),
-]
 
 
 def iso_ms(s):
@@ -39,8 +39,12 @@ def iso_ms(s):
 
 
 def roots():
+    patterns = [
+        (os.path.expanduser("~/.codex/sessions"), "terminal"),
+        (os.path.join(lib.openclaw_paths()["agents"], "*", "agent", "codex-home"), "openclaw"),
+    ]
     out = []
-    for pattern, kind in ROOTS:
+    for pattern, kind in patterns:
         for d in (glob.glob(pattern) if "*" in pattern else [pattern]):
             if os.path.isdir(d):
                 agent = d.split("/agents/")[1].split("/")[0] if "/agents/" in d else None
@@ -61,6 +65,7 @@ def cost(model, inp, out, cached):
 def ingest(con, verbose=True):
     seen = {r[0]: (r[1], r[2], r[3]) for r in con.execute("SELECT path,size,mtime,offset FROM files")}
     rows, limits, files_touched = [], None, 0
+    host = lib.local_host()
 
     for root, kind, agent in roots():
         for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
@@ -119,7 +124,7 @@ def ingest(con, verbose=True):
                         ts, day, m, "codex", 0,
                         max(inp - cached, 0), out, cached, 0, 0, reasoning,
                         cost(m, inp, out, cached) if lib.classify_provider(m) == "openai" else 0.0,
-                        lib.LOCAL_HOST, lib.classify_provider(m),
+                        host, lib.classify_provider(m),
                     ))
             con.execute("INSERT OR REPLACE INTO files (path, size, mtime, offset) VALUES (?,?,?,?)",
                         (path, st.st_size, st.st_mtime, 0))
@@ -134,7 +139,7 @@ def ingest(con, verbose=True):
         con.executemany("""INSERT OR REPLACE INTO attribution
             (session_id, host, kind, label, agent, job_id, method, confidence)
             VALUES (?,?,?,?,?,?,?,?)""",
-            [(s, lib.LOCAL_HOST, "codex", "codex", None, None, "codex-rollout", "high")
+            [(s, host, "codex", "codex", None, None, "codex-rollout", "high")
              for s in sids])
     if limits:
         record_limits(con, *limits)
@@ -164,13 +169,22 @@ def _reset(epoch):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.parse_args()
     con = lib.connect()
     lib.init(con)
-    ingest(con)
+    try:
+        ingest(con)
+    except RuntimeError as e:
+        print(f"codex: {e}", file=sys.stderr)
+        raise SystemExit(1)
     r = con.execute("""SELECT COUNT(*), SUM(input_tokens), SUM(cache_read), SUM(output_tokens),
                               MIN(day), MAX(day) FROM messages WHERE provider='openai'""").fetchone()
-    print(f"db now holds {r[0]} codex turns: {r[1]:,} fresh in / {r[2]:,} cached / "
-          f"{r[3]:,} out, {r[4]} .. {r[5]}")
+    if not r[0]:
+        print("db holds no codex turns (no rollout files found)")
+    else:
+        print(f"db now holds {r[0]} codex turns: {r[1]:,} fresh in / {r[2]:,} cached / "
+              f"{r[3]:,} out, {r[4]} .. {r[5]}")
     q = con.execute("""SELECT five_hour_pct, seven_day_pct FROM quota_samples
                        WHERE provider='openai' ORDER BY ts DESC LIMIT 1""").fetchone()
     if q:

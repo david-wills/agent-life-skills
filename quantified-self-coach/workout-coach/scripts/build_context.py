@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build a compact context bundle for the workout coach agent.
 
-SQL-backed (#2.1, 2026-05-04). Reads the structured metrics layer in
-`knowledge/index.db` instead of walking markdown files:
+Reads the structured metrics layer in `<data_root>/knowledge/index.db`
+(written by structured-metrics) instead of walking markdown files:
 
   - sessions list   → `workouts` (Hevy only, mirroring V1 behavior)
   - per-exercise    → `exercise_sets` joined to `workouts`
@@ -22,7 +22,7 @@ to propose today's session.
 
 Usage:
     python3 build_context.py                         # uses today's date
-    python3 build_context.py --date 2026-04-27       # simulate a given date
+    python3 build_context.py --date 2024-04-29       # simulate a given date
     python3 build_context.py --lookback-sessions 14  # tweak session window
     python3 build_context.py --lookback-perf 365     # tweak per-exercise window
     python3 build_context.py --json                  # machine-readable output
@@ -34,10 +34,15 @@ import argparse
 import json
 import sqlite3
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-KB_ROOT = Path.home() / ".openclaw" / "workspace" / "knowledge"
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
 
 HRV_BASELINE_DAYS = 30
 HRV_LOW_PCT = 0.70  # HRV < 70% of 30-day baseline is the "yellow" trigger per SKILL.md
@@ -45,7 +50,7 @@ HRV_LOW_PCT = 0.70  # HRV < 70% of 30-day baseline is the "yellow" trigger per S
 
 def load_db(db_path: Path) -> sqlite3.Connection:
     if not db_path.is_file():
-        print(f"No KB index at {db_path}", file=sys.stderr)
+        print(f"No index at {db_path}; run structured-metrics/scripts/ingest_metrics.py --all first", file=sys.stderr)
         sys.exit(1)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -110,7 +115,7 @@ def _recovery_band(readiness: float | None, sleep: float | None, hrv_pct: float 
 def load_recovery(conn: sqlite3.Connection, today: date) -> dict | None:
     """Load Oura/AH-resolved recovery for today, falling back to yesterday."""
     for offset in (0, 1):
-        d = (today - _td(offset)).isoformat()
+        d = (today - timedelta(days=offset)).isoformat()
         readiness = _resolved_metric(conn, "readiness_score", d)
         if readiness is None:
             continue
@@ -136,7 +141,7 @@ def load_recovery(conn: sqlite3.Connection, today: date) -> dict | None:
 
 
 def load_sessions(conn: sqlite3.Connection, today: date, lookback_days: int) -> list[dict]:
-    since = (today - _td(lookback_days)).isoformat()
+    since = (today - timedelta(days=lookback_days)).isoformat()
     until = today.isoformat()
     workout_rows = conn.execute(
         """
@@ -170,7 +175,7 @@ def load_sessions(conn: sqlite3.Connection, today: date, lookback_days: int) -> 
 
 def load_last_performance(conn: sqlite3.Connection, today: date, lookback_days: int) -> list[dict]:
     """Per-exercise: latest workout containing it, with that workout's top working set."""
-    since = (today - _td(lookback_days)).isoformat()
+    since = (today - timedelta(days=lookback_days)).isoformat()
     until = today.isoformat()
     rows = conn.execute(
         """
@@ -302,11 +307,6 @@ def render_text(ctx: dict) -> str:
     return "\n".join(out)
 
 
-def _td(days: int):
-    from datetime import timedelta
-    return timedelta(days=days)
-
-
 def _weekday_from_iso(ts: str) -> str:
     """Parse a started_at string (Hevy's ISO8601 with TZ) and return weekday name."""
     s = ts.replace("Z", "+00:00")
@@ -329,7 +329,7 @@ def _fmt_w(x: float) -> str:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--date", help="Override today's date (YYYY-MM-DD). Default: actual today in local time.")
-    p.add_argument("--kb-root", default=str(KB_ROOT))
+    p.add_argument("--kb-root", default=None, help="Index root. Default: <data_root>/knowledge")
     p.add_argument("--lookback-sessions", type=int, default=14, help="Days of recent sessions to list.")
     p.add_argument("--lookback-perf", type=int, default=365, help="Days for per-exercise last-performance window. Coach applies its own staleness rules against last_date.")
     p.add_argument("--json", action="store_true", help="Emit JSON instead of human-readable text.")
@@ -339,7 +339,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     today = date.fromisoformat(args.date) if args.date else date.today()
-    kb_root = Path(args.kb_root).expanduser()
+    if args.kb_root:
+        kb_root = Path(args.kb_root).expanduser()
+    else:
+        from skill_config import data_root
+        kb_root = data_root() / "knowledge"
     db_path = kb_root / "index.db"
     ctx = build_context(today, db_path, args.lookback_sessions, args.lookback_perf)
     if args.json:

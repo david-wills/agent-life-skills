@@ -1,7 +1,5 @@
-"""HTML -> plain text. Extracted from the knowledge-base ingest_reader on
-2026-09-03: the reading-list skill imported it across skill boundaries, which
-CONVENTIONS.md 2 forbids. Stdlib only.
-"""
+"""HTML -> plain text, stdlib only. Shared by the Reader ingest and the
+reading-list summariser."""
 
 from __future__ import annotations
 

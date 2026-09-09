@@ -1,13 +1,15 @@
 ---
 name: workout-coach
-description: Personal-trainer assistant for the user. When the user sends a planning intent in a #workouts channel — the Discord channel in `config.json` → `discord.channels.workouts` (primary; no @mention needed) or Slack `#workouts` (`slack.channels.workouts`) — "what should I do today?", "plan my workout", "gym today", "UB today", etc. — propose today's solo session: warmup + 4-6 exercises (sets × reps × weight) drawn from PROGRAM.md pools, informed by the last 14 days of Hevy history and the user's goals. Reply in whichever channel the ask came from. Do NOT prescribe cardio, nutrition, or Friday trainer days.
+description: Personal-trainer assistant. When the user sends a planning intent in the workouts channel (`config.json` → `discord.channels.workouts`) — "what should I do today?", "plan my workout", "gym today", "UB today" — propose today's solo session: warmup + 4-6 exercises (sets × reps × weight) drawn from PROGRAM.md pools, informed by the last 14 days of Hevy history, this morning's Oura recovery, and the user's goals. Then mirror it to the phone as a Hevy routine. Do NOT prescribe cardio, nutrition, or Friday trainer days.
 ---
 
 # Workout Coach
 
 ## When to invoke
 
-Conversational, not a slash command. A MasterClaw session should invoke this skill when the user sends a workout-planning intent in a `#workouts` channel — **the Discord channel in `config.json` → `discord.channels.workouts` (primary; guild is `requireMention: false`, so no @mention needed)** or Slack `#workouts` (`slack.channels.workouts`). Reply in the same channel the ask arrived on (auto-routed). Recognizers include but aren't limited to:
+Conversational, not a slash command. Invoke this skill when the user sends a
+workout-planning intent in the workouts channel (`discord.channels.workouts`). Reply
+in the same channel. Recognizers include but aren't limited to:
 - "what should I do today?"
 - "plan my workout" / "workout plan" / "plan me"
 - "gym today" / "UB today" / "LB today"
@@ -18,27 +20,27 @@ If the intent is clearly *logging* a completed workout, asking about a past sess
 
 ## Ground truth inputs
 
-Read all four before composing a response:
+Read all four before composing a response. `<data_root>` is `paths.data_root` in
+`config.json`, default `<repo>/_data`.
 
-1. **`workspace/workout-coach/GOALS.md`** — primary goal (recomp), injury/love-hate/trainer-focus constraints.
-2. **`workspace/workout-coach/PROGRAM.md`** — canonical split, movement-pattern exercise pools (★ = already in Hevy history; unmarked = new option), rep-range/RPE/progression defaults.
+1. **`<data_root>/workout-coach/GOALS.md`** — the primary goal, injury / love-hate / trainer-focus constraints, and any secondary emphasis.
+2. **`<data_root>/workout-coach/PROGRAM.md`** — canonical split, movement-pattern exercise pools (★ = already in Hevy history; unmarked = new option), rep-range/RPE/progression defaults.
 
-   Both live outside this repo and hold every personal judgement the skill has — this
+   Both live outside the tracked tree and hold every personal judgement the skill has — this
    file deliberately holds none. `GOALS.example.md` and `PROGRAM.example.md` ship beside
    it as the templates; without a filled-in copy of each at the paths above, the coach
    has no vocabulary to plan from.
-3. **`python3 skills/workout-coach/scripts/build_context.py`** — SQL-backed (#2.1, 2026-05-04). Reads `knowledge/index.db` (the structured metrics layer). Emits:
+3. **`python3 quantified-self-coach/workout-coach/scripts/build_context.py`** — reads `<data_root>/knowledge/index.db` (the structured metrics layer; `SELECT` only). Emits:
    - Current weekday + recommended slot
    - Recovery (Oura): readiness/sleep score, HRV (with `hrv_baseline_30d` + `hrv_pct_of_baseline`), RHR, total sleep min, plus a derived `recovery_band` (`green` / `yellow` / `red`) that already applies the gating table below. Pulled from `metrics_daily_resolved` for today (preferred) or yesterday (fallback). Missing → fall through silently.
    - Last 14 days of Hevy sessions (date, weekday, duration, exercises)
-   - Per-exercise last working set in the 365-day window. Each entry includes `days_since_last` to make the within-pattern variety axis a one-line scan.
+   - Per-exercise last working set in the 365-day window (`last_performance`). Each entry includes `days_since_last` to make the within-pattern variety axis a one-line scan.
 
-   Pass `--date YYYY-MM-DD` to simulate a different day. Pass `--json` for machine-readable output.
+   Flags: `--date YYYY-MM-DD` to simulate a different day, `--json` for machine-readable output, `--lookback-sessions N` (default 14), `--lookback-perf N` (default 365), `--kb-root DIR`.
 4. **The user's message itself** — they may include inline context: time available, energy, equipment ("pull-up station busy"), mood. Honor it.
 
 ```bash
-cd ~/.openclaw/workspace
-python3 skills/workout-coach/scripts/build_context.py
+python3 quantified-self-coach/workout-coach/scripts/build_context.py
 ```
 
 ## Composing the session
@@ -51,14 +53,10 @@ python3 skills/workout-coach/scripts/build_context.py
 - If the user's message overrides ("I want lower today"), trust them.
 
 ### Exercise picks — 3★ / 2 unmarked split
-For each session, target **4-6 movement-pattern slots** drawn from PROGRAM.md. Within those picks, aim for roughly **3 ★ (known) + 2 unmarked (new)** to balance progression against the variety the user wants. Patterns with zero Hevy history (vertical push, lateral delts, calves, quad isolation) force an unmarked pick — those count toward the 2.
+For each session, target **4-6 movement-pattern slots** drawn from PROGRAM.md. Within those picks, aim for roughly **3 ★ (known) + 2 unmarked (new)** to balance progression against the variety the user wants. Patterns with zero Hevy history force an unmarked pick — those count toward the 2.
 
-### Parent-prep bias *(added 2026-05-02)*
-Per GOALS.md, weight unmarked picks toward parent-prep movement qualities when otherwise a coin-flip. Concretely:
-- **UB sessions:** if you have an unmarked slot to fill and `Cable Core Palloff Press` or a loaded carry (`Single Arm Farmer's Walk` / `Farmers Walk`) hasn't appeared in the last 2 UB sessions, prefer one of them over equally-good alternates. Carries slot as a finisher; Pallof slots as the core pick.
-- **LB sessions:** if knee-dominant is in the rotation and `Goblet Squat` (paused bottom, 2-sec) hasn't appeared in the last 2 LB sessions, prefer it as the unmarked knee-dominant pick over `Front Squat` / `Hack Squat`. Cue the paused bottom in the rationale.
-- **Flex / Saturday sessions:** consider `Kettlebell Turkish Get Up` as a full-body finisher when you have spare time and it hasn't been hit in 2+ weeks.
-- **Not exclusive.** Parent-prep moves bias the unmarked slot, they don't replace the program. Hypertrophy compounds (bench, squat, RDL, pull-up) still come first. Variety rules above still apply — don't repeat the same parent-prep move 2 sessions in a row.
+### Secondary emphasis from GOALS.md
+If GOALS.md names a secondary emphasis (a set of movement qualities to favour), apply it only to the **unmarked** slot and only as a tie-breaker between otherwise-equal picks. The compound lifts still come first; the same tie-breaker pick is not repeated two sessions of the same slot in a row. If the section is absent, there is no bias.
 
 ### Variety across weeks (two axes)
 Variety matters on **two independent axes** — apply both when planning the next session of the same slot (e.g. next Monday's UB):
@@ -89,12 +87,12 @@ Provide **2-3 alternate options per exercise slot** drawn from the same movement
 - **31-90 days old:** use the weight, no progression.
 - **>90 days old, or never logged:** leave weight unset (bare-string form). Don't try to seed a conservative-NEW guess for alts — the user fills it in at the gym based on what equipment is in front of them. Blank is more honest than a fabricated number.
 
-The 2nd and 3rd alts stay bare strings either way — they don't get mirrored into Hevy and the Slack briefing only shows their names.
+The 2nd and 3rd alts stay bare strings either way — they don't get mirrored into Hevy and the briefing only shows their names.
 
 ### Recovery gating (Oura readiness)
 The context bundle's `RECOVERY (Oura)` block is the input. Apply it to *intensity*, not to whether to train — the slot decision still comes from the weekday + canonical split. If recovery is missing entirely, fall through silently and plan as usual.
 
-The bundle now pre-computes `recovery_band` (`green` / `yellow` / `red`) using the table below — `band=green` is shown in text mode, present as a JSON field. Trust it as a starting point; you may still escalate further on a conspicuously bad secondary signal not yet baked in.
+The bundle pre-computes `recovery_band` (`green` / `yellow` / `red`) using the table below — `band=green` is shown in text mode, present as a JSON field. Trust it as a starting point; you may still escalate further on a conspicuously bad secondary signal not yet baked in.
 
 | Readiness | Action | Surface line (always include when readiness is present) |
 |-----------|--------|--------|
@@ -110,9 +108,9 @@ Use `readiness_score` as the primary gate. `sleep_score` and `hrv_avg` are secon
 ### Warmup
 1-line prescription: 5 min bike or rower + 1-2 light sets on the first compound. Don't belabor it.
 
-## Response format (Discord/Slack markdown via MasterClaw)
+## Response format (Discord markdown)
 
-Validated with the user 2026-04-24. Use this shape exactly — bolds, italics, bullet chars, indentation all matter.
+Use this shape exactly — bolds, italics, bullet chars, indentation all matter.
 
 ```
 _Monday 4/27 — UPPER BODY, ~45 min_
@@ -142,7 +140,7 @@ _Warmup: 5 min bike + 2 light bench sets (45, 95). Working sets RPE 7–8._
 ```
 
 Notes on format:
-- **Bold = `**double asterisks**`**, italic = `_underscores_`. This CommonMark renders natively in Discord (the primary surface now) and, on Slack, the OpenClaw slack tool converts CommonMark → Slack mrkdwn (single-asterisk `*x*` = italic there, not bold). Same compose format works for both. See `memory/feedback_slack_bold_syntax.md`.
+- **Bold = `**double asterisks**`**, italic = `_underscores_`. This CommonMark renders natively in Discord.
 - Header line italic: `_Monday M/D — SLOT, ~N min_`. No separate context sentence — keep it minimal.
 - Numbered exercise: `N. _PATTERN NAME -_ **Exercise Name**` — pattern uppercase italic, exercise bold.
 - Main bullet `•` (2-space indent) with sets/reps line: `  • 3 × 8–10 @ 125 lb (_rationale in italic_)`.
@@ -164,27 +162,27 @@ Three `<EDIT:>` placeholders may still be unfilled: **injuries**, **love/hate ex
 
 ## Do nots
 
-- **No cardio prescriptions** (walks, zone-2, HIIT). Out of scope for V1.
-- **No nutrition commentary** (calories, macros, deficit). Out of scope for V1.
+- **No cardio prescriptions** (walks, zone-2, HIIT). Out of scope.
+- **No nutrition commentary** (calories, macros, deficit). Out of scope.
 - **Do not plan Friday sessions** — that's the trainer's job.
-- **Do not push toward higher frequency.** They were 5 days/week, moved to 3 deliberately. Old Hevy data showing 4-5/week is prior cadence, not a target.
+- **Do not push toward higher frequency.** GOALS.md states the weekly cadence; older Hevy data showing more sessions per week is prior cadence, not a target.
 - **Do not nag about missed days.** If they skipped a week, just propose today's session.
-- **No slash commands.** Slack eats leading `/`. All triggers are natural-language @mentions.
+- **No slash commands.** All triggers are natural language in the channel.
 
 ## Surface notes
 
-- **Primary surface: Discord `#workouts` (`discord.channels.workouts`)** — both the interactive path and the proactive cron live here as of 2026-07-29.
-  - **Interactive path** (the user asks "what should I do today?" etc.): a MasterClaw session spins up for the Discord channel (guild `requireMention: false`, so no @mention needed), composes the briefing, and replies in-channel (auto-routed). Slack `#workouts` still works as a fallback surface; `#project-workout-logger` (`slack.channels.workout_dev`) is the dev/build channel — do not respond to coach asks there.
-  - **Proactive Mon/Wed cron path**: the cron `payload.message` is self-contained — composes the briefing per this skill, then posts via the Discord REST API (`DISCORD_BOT_TOKEN`, `flags: 4`, splits at 2000-char limit). Crons: `workout-coach-mon-ub` (`7953523a…`, UB) and `workout-coach-wed-lb` (`868c7169…`, LB), both `30 13 * * 1|3` PT.
-- The briefing's `**double asterisks**` bold + `_italic_` render natively in Discord and (on the Slack fallback) via the slack tool, so the same compose format works for both surfaces.
+- **Surface: the Discord channel in `discord.channels.workouts`.** Two paths land here:
+  - **Interactive path** — the user asks "what should I do today?" etc.; compose the briefing per this skill and reply in-channel.
+  - **Proactive path** — a scheduled job for each solo slot (the Monday UB and the midweek LB, at whatever hour you leave for the gym) runs the same composition unprompted and posts it via `lib/discord.py` (`send_message` handles the 2000-character split and embed suppression). The job's prompt is self-contained: build context, read GOALS.md and PROGRAM.md, compose, post, then push.
+- The briefing's `**double asterisks**` bold + `_italic_` render natively in Discord; no conversion step.
 
 ## Sync to Hevy on the phone
 
-After composing the Slack reply, **mirror the same plan onto the user's phone** as a Hevy routine they can open and start. **Two slot-specific rolling routines** — UB pushes overwrite `Today's Workout — Upper Body` (ID cached at `workout-coach/hevy-cache/routine_ub.json`); LB pushes overwrite `Today's Workout — Lower Body` (`routine_lb.json`). An upper-body push never clobbers the lower-body plan sitting on the phone, and vice versa. Two routines in the list, no more.
+After composing the briefing, **mirror the same plan onto the user's phone** as a Hevy routine they can open and start. **Two slot-specific rolling routines** — UB pushes overwrite `Today's Workout — Upper Body` (ID cached at `<data_root>/workout-coach/hevy-cache/routine_ub.json`); LB pushes overwrite `Today's Workout — Lower Body` (`routine_lb.json`). An upper-body push never clobbers the lower-body plan sitting on the phone, and vice versa. Two routines in the list, no more.
 
-**Set the `slot` field in every plan** (`"slot": "UB"` or `"slot": "LB"`) so the push targets the right routine. If omitted, the script sniffs the plan `title` for UB/LB/upper/lower as a fallback — but be explicit. A plan with neither a `slot` nor a slot hint in the title falls back to the legacy single `Today's Workout` routine.
+**Set the `slot` field in every plan** (`"slot": "UB"` or `"slot": "LB"`) so the push targets the right routine. If omitted, the script sniffs the plan `title` for UB/LB/upper/lower as a fallback — but be explicit. A plan with neither a `slot` nor a slot hint in the title is rejected.
 
-**Critical delivery rule — turn boundaries.** The briefing must be its own end-turn message (Discord or Slack), with *no* tool calls in the same turn. Bundling the briefing text with the Hevy-push Bash call has been observed to drop the briefing from delivery (the harness only flushed text from the final `end_turn` turn). This is surface-independent. Required ordering:
+**Critical delivery rule — turn boundaries.** The briefing must be its own end-turn message, with *no* tool calls in the same turn. Bundling the briefing text with the Hevy-push Bash call has been observed to drop the briefing from delivery (the harness only flushed text from the final `end_turn` turn). Required ordering:
 
 1. **Turn A:** Emit the briefing as a text-only response. End the turn (no tool calls).
 2. **Turn B (next turn):** Run the `push_to_hevy_routine.py` Bash call.
@@ -195,7 +193,7 @@ Do not combine the briefing text with the push tool call in a single turn, even 
 Build a plan JSON and pipe it to the push script:
 
 ```bash
-cat <<'EOF' | python3 skills/workout-coach/scripts/push_to_hevy_routine.py
+cat <<'EOF' | python3 quantified-self-coach/workout-coach/scripts/push_to_hevy_routine.py
 {
   "title": "Today's Workout — Mon 4/27 UB",
   "slot": "UB",
@@ -220,11 +218,13 @@ Plan field reference:
 - `notes` — top-level routine notes. Use for warmup line + GOALS placeholder heads-up.
 - `exercises[].name` — must match a Hevy exercise template title exactly. PROGRAM.md is already in sync with Hevy's catalog, so just use the names from there. If a name doesn't resolve, the script auto-refreshes the cache once (picking up any custom exercises the user has added in Hevy); only after that miss does it abort with close-match suggestions.
 - `exercises[].sets` — int, working sets only (no warmup sets in routine).
-- `exercises[].reps` — `"8-10"`, `"8–10"`, or single int. Translates to Hevy `rep_range` or `reps`.
+- `exercises[].reps` — `"8-10"`, `"8–10"`, `"8 to 10"`, or a single int. Translates to Hevy `rep_range` or `reps`.
 - `exercises[].weight_lb` — float; converts to kg before push. Omit for bodyweight.
 - `exercises[].notes` — per-exercise rationale; this is where the `(_last: …_)` / `(_NEW — …_)` justifications go. Carries through to the phone.
 - `exercises[].rest_seconds` — defaults to 90.
-- `exercises[].alts` — list of alt exercise names (Hevy-canonical). Each entry is either a bare string (`"Lat Pulldown (Cable)"`) or a dict (`{"name": "Lat Pulldown (Cable)", "weight_lb": 100}`). Always populate with the same 2-3 alts shown in the briefing — the **first** alt is mirrored into the routine as a follow-up exercise so the user can pick the primary or the alt at the gym; the rest stay in the briefing text only. The mirrored alt has matching sets/reps and a note flagging it as "ALT for X — do this OR X, not both." For the first alt, **prefer the dict form** and set `weight_lb` from the same per-exercise history lookup used for primaries (see context bundle's `last_working_sets`) — this saves the user from having to remember alt weights at the gym. Fall back to bare string only when no history exists for the alt and no reasonable conservative default applies.
+- `exercises[].alts` — list of alt exercise names (Hevy-canonical). Each entry is either a bare string (`"Lat Pulldown (Cable)"`) or a dict (`{"name": "Lat Pulldown (Cable)", "weight_lb": 100}`). Always populate with the same 2-3 alts shown in the briefing — the **first** alt is mirrored into the routine as a follow-up exercise so the user can pick the primary or the alt at the gym; the rest stay in the briefing text only. The mirrored alt has matching sets/reps and a note flagging it as "ALT for X — do this OR X, not both." For the first alt, **prefer the dict form** and set `weight_lb` from the same per-exercise history lookup used for primaries (see the context bundle's `last_performance`) — this saves the user from having to remember alt weights at the gym. Fall back to bare string only when no history exists for the alt and no reasonable conservative default applies.
+
+Script flags: `--plan-file PATH` (else stdin), `--dry-run` (resolve names, print the routine payload, no PUT — still needs the API key if the template cache is missing or a name misses), `--refresh` (re-fetch template + routine caches), `--bootstrap` (seed the caches and exit; no plan needed), `--cache-dir DIR` (default `<data_root>/workout-coach/hevy-cache`).
 
 Call **after** posting the briefing reply (so the user sees the briefing immediately and the on-phone routine catches up a moment later). On success, append a brief footer to the reply or a follow-up message:
 
@@ -243,7 +243,7 @@ If the push fails (HTTP error, unresolved name), don't retry silently — surfac
 
 ## Post-session follow-up
 
-V1 does **not** ask them to log anything manually. They log in Hevy; a nightly delta cron (adjacent task, not yet wired) will ingest it. If they reply with "I did X instead" or "bumped squat to 135", acknowledge briefly but don't mutate any files — the next Hevy sync will make it authoritative.
+The coach does **not** ask them to log anything manually. They log in Hevy; the next daily sync ingests it. If they reply with "I did X instead" or "bumped squat to 135", acknowledge briefly but don't mutate any files — the next Hevy sync will make it authoritative.
 
 If the user adjusts the plan in chat ("swap squats for leg press, drop sets to 2"), re-run the push with the updated plan — the rolling routine PUT-overwrites cleanly.
 
@@ -251,28 +251,28 @@ If the user adjusts the plan in chat ("swap squats for leg press, drop sets to 2
 
 ```bash
 # Build context (today)
-python3 skills/workout-coach/scripts/build_context.py
+python3 quantified-self-coach/workout-coach/scripts/build_context.py
 
 # Simulate another day
-python3 skills/workout-coach/scripts/build_context.py --date 2026-04-27
+python3 quantified-self-coach/workout-coach/scripts/build_context.py --date 2024-04-29
 
 # Machine-readable
-python3 skills/workout-coach/scripts/build_context.py --json
+python3 quantified-self-coach/workout-coach/scripts/build_context.py --json
 
-# Push today's plan to the Hevy rolling routine
-cat plan.json | python3 skills/workout-coach/scripts/push_to_hevy_routine.py
+# Push today's plan to the slot's rolling routine
+cat plan.json | python3 quantified-self-coach/workout-coach/scripts/push_to_hevy_routine.py
 
 # One-time: bootstrap template + both slot routine caches (UB + LB); rerun with
 # --refresh if Hevy adds new exercises
-python3 skills/workout-coach/scripts/push_to_hevy_routine.py --bootstrap [--refresh]
+python3 quantified-self-coach/workout-coach/scripts/push_to_hevy_routine.py --bootstrap [--refresh]
 
 # Validate without pushing
-cat plan.json | python3 skills/workout-coach/scripts/push_to_hevy_routine.py --dry-run
+cat plan.json | python3 quantified-self-coach/workout-coach/scripts/push_to_hevy_routine.py --dry-run
 ```
 
 Relevant paths:
 ```
-skills/workout-coach/
+quantified-self-coach/workout-coach/
   ├── SKILL.md                         (this file)
   ├── GOALS.example.md                 (template for the GOALS.md below)
   ├── PROGRAM.example.md               (template for the PROGRAM.md below)
@@ -280,22 +280,15 @@ skills/workout-coach/
       ├── build_context.py             (context bundler)
       └── push_to_hevy_routine.py      (mirror plan to phone)
 
-workspace/workout-coach/
+<data_root>/workout-coach/
   ├── GOALS.md                         (goals, constraints, injuries)
   ├── PROGRAM.md                       (split, pools, rep-range defaults)
   └── hevy-cache/
-      ├── templates.json               (name → exercise_template_id, ~480 entries)
+      ├── templates.json               (name → exercise_template_id, Hevy's full catalog)
       ├── routine_ub.json              (UB rolling routine UUID)
       ├── routine_lb.json              (LB rolling routine UUID)
-      ├── routine.json                 (legacy single-routine UUID; unused once slots are wired)
       └── aliases.json                 (PROGRAM.md → Hevy title overrides)
 
-knowledge/hevy/<uuid>.md               (per-workout markdown, 486+ files)
-knowledge/index.db                     (FTS5 index; shared across all sources)
+<data_root>/knowledge/hevy/<uuid>.md   (per-workout markdown, one per logged session)
+<data_root>/knowledge/index.db         (FTS5 index + structured tables; shared across all sources)
 ```
-
-Relevant memories:
-- `memory/project_workout_coach.md` — project state (authoritative).
-- `memory/feedback_slack_slash_commands.md` — why no slash commands.
-- `memory/feedback_slack_channel_references.md` — `<#ID>` mention form only.
-- `handoffs/workout-coach-agent-2026-04-23.md` — full design rationale and scope decisions.

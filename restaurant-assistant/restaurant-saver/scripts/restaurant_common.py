@@ -1,60 +1,50 @@
 #!/usr/bin/env python3
-"""Shared data layer for the restaurant skills.
+"""Shared data layer for the restaurant assistant.
 
-One SQLite database backs all three skills:
-  - restaurant-saver    (intake: drop a place in #restaurants)
-  - restaurant-planner  (Wednesday: free Thursdays -> suggestions -> booking)
-  - restaurant-brief    (day-of: what to order)
+One SQLite database backs intake, planning, the reaction sweep and the day-of
+brief. The DB is the product; the scripts are doors into it.
 
-The DB is the product; the skills are doors into it.
+Everything writable lives under ``data_root()/restaurant-saver/`` (the database
+and the Chrome profile). Nothing here reads config at import time, so
+``--help`` works on a fresh clone with no config.json.
 """
 from __future__ import annotations
 
 import datetime as dt
 import math
+import os
 import re
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
 
-WORKSPACE = Path.home() / ".openclaw" / "workspace"
-DB_PATH = WORKSPACE / "restaurant-saver" / "restaurants.db"
-
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2). Walk up to find it
-# rather than hardcoding a path: skills are reached through a symlink.
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-from skill_config import cfg  # noqa: E402
 
-# PEP 562: `rc.RESTAURANTS_CHANNEL` resolves on access, not at import, so a
-# missing key cannot break every module that imports this one.
-_CONFIG_ATTRS = {
-    "RESTAURANTS_CHANNEL": "discord.channels.restaurants",
-    # Origin for all travel-time math, the shared calendar and the gog identity
-    # are deployment facts, not source. Real values live in config.local.json,
-    # which is gitignored — see CONVENTIONS.md 6.
-    "HOME": "user.home",
-    "CALENDAR_ID": "calendars.shared",
-    "GOG_ACCOUNT": "accounts.service",
-}
-
-
-def __getattr__(name: str):
-    key = _CONFIG_ATTRS.get(name)
-    if key is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return cfg(key)
-
-
-def __dir__() -> list[str]:
-    return sorted(list(globals()) + list(_CONFIG_ATTRS))
+from skill_config import cfg, data_root  # noqa: E402
 
 STATUS_WANT = "want_to_go"
 STATUS_BEEN = "been"
 STATUS_FAVORITE = "favorite"
+STATUS_ARCHIVED = "archived"   # never delete a place; park it here instead
+
+DATA_DIRNAME = "restaurant-saver"
+
+
+def skill_data_dir() -> Path:
+    """``<data_root>/restaurant-saver`` — database and browser profile live here."""
+    d = data_root() / DATA_DIRNAME
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def db_path() -> Path:
+    return skill_data_dir() / "restaurants.db"
 
 
 # --------------------------------------------------------------------------
@@ -80,9 +70,7 @@ CREATE TABLE IF NOT EXISTS restaurants (
     drive_text            TEXT,
     reservation_platform  TEXT,
     reservation_url       TEXT,
-    booking_window        TEXT,
     status                TEXT NOT NULL DEFAULT 'want_to_go',
-    maps_saved            INTEGER NOT NULL DEFAULT 0,
     added_at              TEXT NOT NULL,
     visited_at            TEXT,
     last_suggested_at     TEXT,
@@ -101,27 +89,13 @@ CREATE TABLE IF NOT EXISTS suggestions (
     UNIQUE(message_id)
 );
 
-CREATE TABLE IF NOT EXISTS reservations (
-    id             INTEGER PRIMARY KEY,
-    restaurant_id  INTEGER NOT NULL REFERENCES restaurants(id),
-    reserved_for   TEXT NOT NULL,
-    party_size     INTEGER NOT NULL DEFAULT 2,
-    platform       TEXT,
-    state          TEXT NOT NULL DEFAULT 'pending',
-    confirmation   TEXT,
-    detail         TEXT,
-    created_at     TEXT NOT NULL,
-    UNIQUE(restaurant_id, reserved_for)
-);
-
 CREATE INDEX IF NOT EXISTS idx_restaurants_status ON restaurants(status);
 CREATE INDEX IF NOT EXISTS idx_suggestions_state  ON suggestions(state);
 """
 
 
 def connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(db_path()))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     return conn
@@ -131,29 +105,35 @@ def connect() -> sqlite3.Connection:
 # browser identity
 # --------------------------------------------------------------------------
 
-CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# The resolver drives the real installed Google Chrome, not Playwright's bundled
+# Chromium: Google refuses sign-in on the bundled build. macOS default below;
+# set CHROME_PATH to point at a Chrome binary anywhere else.
+DEFAULT_CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+def chrome_bin() -> str:
+    return os.environ.get("CHROME_PATH") or DEFAULT_CHROME_BIN
 
 
 def chrome_version() -> str:
-    """Major version of the installed Chrome, e.g. "152"."""
+    """Major version of the installed Chrome, e.g. "140". Falls back to a recent one."""
     import subprocess
     try:
-        out = subprocess.run([CHROME_BIN, "--version"], capture_output=True,
+        out = subprocess.run([chrome_bin(), "--version"], capture_output=True,
                              text=True, timeout=10).stdout
         m = re.search(r"(\d+)\.", out)
         if m:
             return m.group(1)
     except Exception:
         pass
-    return "152"
+    return "140"
 
 
 def chrome_ua() -> str:
     """A UA string matching the installed Chrome.
 
-    Hardcoding a version is a bot tell: Chrome still sends real Sec-CH-UA
-    client hints, so a stale UA disagrees with them. Akamai (OpenTable)
-    blocks on that mismatch even when Google tolerates it.
+    Chrome still sends real Sec-CH-UA client hints, so a hardcoded version that
+    disagrees with them is an easy automation tell. Read the version live.
     """
     return (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -234,12 +214,17 @@ def platform_for_url(url: str | None) -> str | None:
 FIELDS = (
     "name", "address", "lat", "lng", "maps_url", "cuisine", "price", "rating",
     "review_count", "note", "source_url", "source_raw", "drive_minutes",
-    "drive_text", "reservation_platform", "reservation_url", "booking_window",
-    "status", "maps_saved", "visited_at",
+    "drive_text", "reservation_platform", "reservation_url", "status", "visited_at",
 )
 
 
 def find_restaurant(conn: sqlite3.Connection, name: str, address: str = "") -> sqlite3.Row | None:
+    """Locate a stored place by name (+ address when we have one).
+
+    A name-only match is only trusted when one side has no address: two places
+    sharing a name at different addresses are different restaurants, and a
+    bare name lookup (the day-of brief) has nothing to compare against.
+    """
     if address:
         row = conn.execute(
             "SELECT * FROM restaurants WHERE lower(name)=lower(?) AND lower(address)=lower(?)",
@@ -247,6 +232,9 @@ def find_restaurant(conn: sqlite3.Connection, name: str, address: str = "") -> s
         ).fetchone()
         if row:
             return row
+        return conn.execute(
+            "SELECT * FROM restaurants WHERE lower(name)=lower(?) AND address=''", (name,)
+        ).fetchone()
     return conn.execute(
         "SELECT * FROM restaurants WHERE lower(name)=lower(?)", (name,)
     ).fetchone()
@@ -280,7 +268,7 @@ def upsert_restaurant(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[i
         if f not in data:
             continue
         new = data[f]
-        if new in (None, "", 0) and f != "maps_saved":
+        if new in (None, "", 0):
             continue
         if f == "note" and existing["note"]:
             # append rather than clobber an earlier reason for saving
@@ -295,9 +283,7 @@ def upsert_restaurant(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[i
     return int(existing["id"]), False
 
 
-def mark_visited(conn: sqlite3.Connection, restaurant_id: int, when: str | None = None) -> None:
-    conn.execute(
-        "UPDATE restaurants SET status=?, visited_at=? WHERE id=?",
-        (STATUS_BEEN, when or now_iso(), restaurant_id),
-    )
+def set_status(conn: sqlite3.Connection, restaurant_id: int, status: str) -> None:
+    """Change a place's status. Archiving is the only way a place leaves the list."""
+    conn.execute("UPDATE restaurants SET status=? WHERE id=?", (status, restaurant_id))
     conn.commit()

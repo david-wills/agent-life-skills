@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Post Thursday suggestion cards to Discord #restaurants.
+"""Post Thursday suggestion cards to the Discord restaurants channel.
 
 Reads a payload on stdin so the agent supplies the blurbs:
-    {"date": "2026-09-10",
-     "intro": "Thursday the 10th is open...",
+    {"date": "2027-01-07",
+     "intro": "Thursday the 7th is open...",
      "picks": [{"id": 3, "blurb": "..."}, ...]}
 
 One card per restaurant, each seeded with ✅ — reactions are per-message, so a
@@ -16,20 +16,20 @@ import datetime as dt
 import json
 import sys
 import time
-import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import restaurant_common as rc  # noqa: E402
 
-# Shared helpers live in the repo-root lib/ (CONVENTIONS.md 2). Walk up to find it
-# rather than hardcoding a path: skills are reached through a symlink.
-from pathlib import Path as _P  # noqa: E402
-_LIB = next(p / "lib" for p in _P(__file__).resolve().parents if (p / "lib" / "read_secret.py").is_file())
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-import socratic_common as sc  # noqa: E402
+
+from discord import add_reaction, get_discord_token, send_message  # noqa: E402
 
 BOOK_EMOJI = "✅"
 
@@ -54,8 +54,8 @@ def card_text(row, blurb: str, date_label: str) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
+    ap = argparse.ArgumentParser(description="Post suggestion cards from a JSON payload on stdin.")
+    ap.add_argument("--dry-run", action="store_true", help="Print the cards instead of posting")
     args = ap.parse_args()
 
     payload = json.load(sys.stdin)
@@ -67,10 +67,11 @@ def main() -> int:
         return 1
 
     conn = rc.connect()
-    token = None if args.dry_run else sc.get_discord_token()
+    channel = None if args.dry_run else rc.cfg("discord.channels.restaurants")
+    token = None if args.dry_run else get_discord_token()
 
     if payload.get("intro") and not args.dry_run:
-        sc._discord_send(rc.RESTAURANTS_CHANNEL, payload["intro"], token=token)
+        send_message(channel, payload["intro"], token=token)
         time.sleep(0.4)
     elif payload.get("intro"):
         print(f"[intro]\n{payload['intro']}\n")
@@ -84,21 +85,19 @@ def main() -> int:
         if args.dry_run:
             print(f"[card {row['id']}]\n{text}\n")
             continue
-        msgs = sc._discord_send(rc.RESTAURANTS_CHANNEL, text, token=token)
+        msgs = send_message(channel, text, token=token)
         if not msgs:
             continue
         mid = msgs[0]["id"]
-        path = (f"/channels/{rc.RESTAURANTS_CHANNEL}/messages/{mid}"
-                f"/reactions/{urllib.parse.quote(BOOK_EMOJI)}/@me")
         try:
-            sc.discord_request("PUT", path, token=token)
-        except Exception:  # noqa: BLE001 - affordance is cosmetic, never fatal
+            add_reaction(channel, mid, BOOK_EMOJI, token=token)
+        except Exception:  # noqa: BLE001 - the seed reaction is an affordance, never fatal
             pass
         conn.execute(
             "INSERT OR REPLACE INTO suggestions "
             "(restaurant_id, target_date, channel, message_id, state, posted_at) "
             "VALUES (?,?,?,?,'offered',?)",
-            (row["id"], target_date, rc.RESTAURANTS_CHANNEL, mid, rc.now_iso()),
+            (row["id"], target_date, channel, mid, rc.now_iso()),
         )
         conn.execute("UPDATE restaurants SET last_suggested_at=? WHERE id=?",
                      (rc.now_iso(), row["id"]))

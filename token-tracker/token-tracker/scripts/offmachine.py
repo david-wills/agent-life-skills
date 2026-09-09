@@ -14,7 +14,11 @@ Two independent signals, neither of which needs access to the other machine:
      across consecutive samples inside one 5h window. `k` converts local dollars
      to quota percent; `r` is the residual drift that local spend can't explain,
      i.e. the other machines' burn rate. Needs a few hours of samples.
+
+Usage:
+  offmachine.py            # print both signals from the stored samples
 """
+import argparse
 import json
 import os
 import sys
@@ -46,6 +50,7 @@ def intervals(con):
     """Consecutive quota samples inside one 5h window, paired with local spend."""
     rows = con.execute("""SELECT ts, five_hour_pct, five_hour_reset FROM quota_samples
                           WHERE five_hour_pct IS NOT NULL ORDER BY ts""").fetchall()
+    local = lib.local_host()
     out = []
     for (t0, u0, r0), (t1, u1, r1) in zip(rows, rows[1:]):
         if r0 != r1 or u1 < u0:
@@ -58,7 +63,7 @@ def intervals(con):
         spend = con.execute(
             "SELECT COALESCE(SUM(cost_usd),0) FROM messages "
             "WHERE ts > ? AND ts <= ? AND host = ? AND provider = 'anthropic'",
-            (t0, t1, lib.LOCAL_HOST)).fetchone()[0]
+            (t0, t1, local)).fetchone()[0]
         out.append((u1 - u0, spend, dt))
     return out
 
@@ -78,7 +83,7 @@ def fit(con):
         return None, len(data)
     k = (ssu * stt - stu * sst) / det          # quota % per local dollar
     r = (sss * stu - sst * ssu) / det          # quota % per hour, unexplained
-    return {"pct_per_dollar": k, "offmachine_pct_per_hour": max(r, 0.0),
+    return {"offmachine_pct_per_hour": max(r, 0.0),
             "usd_per_pct": (1.0 / k) if k > 1e-9 else None,
             "n": len(data)}, len(data)
 
@@ -91,13 +96,16 @@ def summary(con):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.parse_args()
     con = lib.connect()
     lib.init(con)
     s = summary(con)
     print("models burning quota with no local usage:", s["unseen_models"] or "none")
     if s["fit"]:
         f = s["fit"]
-        print(f"local rate: ${f['usd_per_pct']:.2f} per 1% of 5h quota")
+        if f["usd_per_pct"]:
+            print(f"local rate: ${f['usd_per_pct']:.2f} per 1% of 5h quota")
         print(f"off-machine drift: {f['offmachine_pct_per_hour']:.2f}%/hour  (n={f['n']})")
     else:
         print(f"regression: need {MIN_INTERVALS} intervals, have {s['n_intervals']} "

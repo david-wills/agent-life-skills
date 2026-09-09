@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structured-metrics ingest into ``knowledge/index.db``.
+"""Structured-metrics ingest into ``<data_root>/knowledge/index.db``.
 
 Populates four tables (plus one view) from per-source canonical files:
 
@@ -23,6 +23,7 @@ CLI:
   python3 ingest_metrics.py --days 7                      # last 7 days
   python3 ingest_metrics.py --source apple-health --days 7
   python3 ingest_metrics.py --source hevy --all
+  python3 ingest_metrics.py --all --dry-run               # counts only, in-memory DB
 """
 
 from __future__ import annotations
@@ -34,10 +35,14 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-DEFAULT_KB_ROOT = Path.home() / ".openclaw" / "workspace" / "knowledge"
-DEFAULT_IMPORTS_ROOT = Path.home() / ".openclaw" / "workspace" / "imports"
+# Shared helpers live in lib/ at the repo root; walk up so this works from any cwd.
+_LIB = next((p / "lib" for p in Path(__file__).resolve().parents if (p / "lib" / "skill_config.py").is_file()), None)
+if _LIB is None:
+    raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
 
 KG_TO_LB = 2.2046226218
 
@@ -56,7 +61,7 @@ OURA_METRIC_MAP = {
 }
 
 # Apple Health metric names that surface to metrics_daily. Mirrors CORE_METRICS
-# in skills/import-apple-health/scripts/parse_hae_payload.py. Identity mapping
+# in import-apple-health/scripts/parse_hae_payload.py. Identity mapping
 # (raw key == canonical name) — kept here so this script doesn't have to import
 # from a sibling skill. Skip-list metrics from SKILL.md (sleep_*, blood_oxygen,
 # walking_*, etc.) are NOT in this list and never surface to SQL.
@@ -176,10 +181,14 @@ def _iso_utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def ensure_db(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA journal_mode=WAL")
+def ensure_db(db_path: Path | None) -> sqlite3.Connection:
+    """Open (or create) the index. ``None`` gives an in-memory DB for --dry-run."""
+    if db_path is None:
+        conn = sqlite3.connect(":memory:")
+    else:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA_DDL)
     conn.commit()
@@ -194,6 +203,48 @@ def _ymd_from_str(s: str | None) -> str | None:
         return None
     m = _DATE_RE.match(s)
     return m.group(1) if m else None
+
+
+def local_day(ts: str | None) -> str | None:
+    """Calendar day of an ISO timestamp in this machine's local timezone.
+
+    Hevy stores start_time in UTC; a 6 PM session west of Greenwich is already
+    tomorrow in UTC. The markdown from ingest_hevy.py uses the local day, and
+    `workouts.date` must agree with it. Falls back to the leading YYYY-MM-DD when
+    the string will not parse.
+    """
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    text = ts.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return _ymd_from_str(ts)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone().date().isoformat()
+
+
+# INSERT OR REPLACE would delete-then-insert the workouts row, and with
+# foreign_keys=ON that cascades into exercise_sets. Upsert in place instead so
+# a re-ingest without raw set data leaves the existing sets alone.
+_WORKOUT_UPSERT = """
+INSERT INTO workouts
+    (id, source, started_at, ended_at, date, duration_min, type, title,
+     total_volume_lb, total_calories, avg_hr_bpm, max_hr_bpm, min_hr_bpm,
+     exercise_count, set_count, notes, ingested_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    source=excluded.source, started_at=excluded.started_at, ended_at=excluded.ended_at,
+    date=excluded.date, duration_min=excluded.duration_min, type=excluded.type,
+    title=excluded.title, total_volume_lb=excluded.total_volume_lb,
+    total_calories=excluded.total_calories, avg_hr_bpm=excluded.avg_hr_bpm,
+    max_hr_bpm=excluded.max_hr_bpm, min_hr_bpm=excluded.min_hr_bpm,
+    exercise_count=excluded.exercise_count, set_count=excluded.set_count,
+    notes=excluded.notes, ingested_at=excluded.ingested_at
+"""
 
 
 def _slugify(s: str) -> str:
@@ -408,16 +459,7 @@ def ingest_apple_health_workouts(
             ))
 
     if rows:
-        conn.executemany(
-            """
-            INSERT OR REPLACE INTO workouts
-                (id, source, started_at, ended_at, date, duration_min, type, title,
-                 total_volume_lb, total_calories, avg_hr_bpm, max_hr_bpm, min_hr_bpm,
-                 exercise_count, set_count, notes, ingested_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
+        conn.executemany(_WORKOUT_UPSERT, rows)
         conn.commit()
     return len(rows), skipped
 
@@ -575,12 +617,12 @@ def ingest_hevy_workouts(
     if not src_dir.is_dir():
         return 0, 0, 0, 0
 
-    imports_root = imports_root or DEFAULT_IMPORTS_ROOT
-    set_data_by_id = _load_hevy_set_data(imports_root)
+    set_data_by_id = _load_hevy_set_data(imports_root) if imports_root else {}
 
     ingested_at = _iso_utc_now()
     workout_rows: list[tuple[Any, ...]] = []
     set_rows: list[tuple[Any, ...]] = []
+    ids_with_raw_sets: list[str] = []
     volume_by_date: dict[str, float] = {}
     skipped = 0
 
@@ -595,7 +637,7 @@ def ingest_hevy_workouts(
         # frontmatter id is "hevy:<uuid>"; raw uuid is filename stem
         uuid = f.stem
         captured_at = fm.get("captured_at") or ""
-        date_str = _ymd_from_str(captured_at) or _ymd_from_str(raw_id) or ""
+        date_str = local_day(captured_at) or _ymd_from_str(raw_id) or ""
         if not date_str:
             skipped += 1
             continue
@@ -639,8 +681,13 @@ def ingest_hevy_workouts(
         if volume_lb is not None:
             volume_by_date[date_str] = volume_by_date.get(date_str, 0.0) + volume_lb
 
-        # Set-level rows from raw JSON
-        exercises = set_data_by_id.get(uuid) or []
+        # Set-level rows from raw JSON. Only when this workout is present in a
+        # raw import do we clear and rewrite its sets; otherwise whatever was
+        # ingested before stays.
+        if uuid not in set_data_by_id:
+            continue
+        ids_with_raw_sets.append(f"hevy:{uuid}")
+        exercises = set_data_by_id[uuid] or []
         flat_index = 0
         for ex in exercises:
             ex_title = ex.get("title") or ""
@@ -668,22 +715,12 @@ def ingest_hevy_workouts(
                 ))
                 flat_index += 1
 
-    # Apply transactionally per source: workouts → exercise_sets (with cascade clear) → volume rollup
+    # Apply per source: workouts (upsert in place) → exercise_sets (clear + rewrite
+    # only for workouts whose raw JSON was found) → volume rollup
     if workout_rows:
-        conn.executemany(
-            """
-            INSERT OR REPLACE INTO workouts
-                (id, source, started_at, ended_at, date, duration_min, type, title,
-                 total_volume_lb, total_calories, avg_hr_bpm, max_hr_bpm, min_hr_bpm,
-                 exercise_count, set_count, notes, ingested_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            workout_rows,
-        )
-        # Clear sets for these workouts so we re-insert clean
-        ids = [r[0] for r in workout_rows]
-        # SQLite has no parameterized IN-list, so chunk via executemany single-row delete
-        conn.executemany("DELETE FROM exercise_sets WHERE workout_id = ?", [(i,) for i in ids])
+        conn.executemany(_WORKOUT_UPSERT, workout_rows)
+    if ids_with_raw_sets:
+        conn.executemany("DELETE FROM exercise_sets WHERE workout_id = ?", [(i,) for i in ids_with_raw_sets])
 
     if set_rows:
         conn.executemany(
@@ -720,9 +757,10 @@ def ingest_hevy_workouts(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--kb-root", default=str(DEFAULT_KB_ROOT))
-    p.add_argument("--imports-root", default=str(DEFAULT_IMPORTS_ROOT))
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--kb-root", default=None, help="Index root. Default: <data_root>/knowledge")
+    p.add_argument("--imports-root", default=None,
+                   help="Where raw Hevy exports live (for exercise_sets). Default: <data_root>/imports")
     p.add_argument(
         "--source",
         choices=["apple-health", "oura", "hevy", "all"],
@@ -733,13 +771,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--all", action="store_true", help="Backfill — ignore window."
     )
+    p.add_argument("--dry-run", action="store_true",
+                   help="Compute and print the per-source counts against an in-memory DB; write nothing.")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    kb_root = Path(args.kb_root).expanduser()
-    imports_root = Path(args.imports_root).expanduser()
+    if args.kb_root and args.imports_root:
+        kb_root = Path(args.kb_root).expanduser()
+        imports_root = Path(args.imports_root).expanduser()
+    else:
+        from skill_config import data_root
+        root = data_root()
+        kb_root = Path(args.kb_root).expanduser() if args.kb_root else root / "knowledge"
+        imports_root = Path(args.imports_root).expanduser() if args.imports_root else root / "imports"
 
     since: dt.date | None = None
     if args.all:
@@ -756,18 +802,19 @@ def main() -> int:
         # Default for cron: last 7 days.
         since = dt.date.today() - dt.timedelta(days=7)
 
-    conn = ensure_db(kb_root / "index.db")
+    conn = ensure_db(None if args.dry_run else kb_root / "index.db")
+    prefix = "dry-run " if args.dry_run else ""
     try:
         if args.source in ("apple-health", "all"):
             m_w, m_sk = ingest_apple_health_metrics(conn, kb_root, since)
             w_w, w_sk = ingest_apple_health_workouts(conn, kb_root, since)
-            print(f"apple-health: metrics={m_w} workouts={w_w} skipped={m_sk + w_sk}")
+            print(f"{prefix}apple-health: metrics={m_w} workouts={w_w} skipped={m_sk + w_sk}")
         if args.source in ("oura", "all"):
             o_m, o_s, o_sk = ingest_oura_metrics(conn, kb_root, since)
-            print(f"oura: metrics={o_m} sleep_sessions={o_s} skipped={o_sk}")
+            print(f"{prefix}oura: metrics={o_m} sleep_sessions={o_s} skipped={o_sk}")
         if args.source in ("hevy", "all"):
             h_w, h_s, h_v, h_sk = ingest_hevy_workouts(conn, kb_root, since, imports_root)
-            print(f"hevy: workouts={h_w} sets={h_s} volume_rows={h_v} skipped={h_sk}")
+            print(f"{prefix}hevy: workouts={h_w} sets={h_s} volume_rows={h_v} skipped={h_sk}")
     finally:
         conn.close()
     return 0
