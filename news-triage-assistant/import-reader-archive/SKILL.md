@@ -70,5 +70,5 @@ On demand, or a daily delta if you want the index to track your reading: `--hour
 - Endpoint: `GET https://readwise.io/api/v3/list/`, filter `location=archive`, pagination via `nextPageCursor` until empty.
 - Rate limit: ~20 requests/minute per token; the importer sleeps 250ms between pages.
 - The `reading-list` skill writes its summaries to the Reader document `notes` field, never `summary`, so `summary_source: reader` here always means Reader's own text.
-- The small helpers (`_slug`, ISO parsing, the FTS schema, frontmatter rendering) are duplicated between this skill and `import-readwise-highlights` on purpose, so each skill stands alone.
+- The small helpers (`_slug`, ISO parsing, frontmatter rendering) are duplicated between this skill and `import-readwise-highlights` on purpose, so each skill stands alone. The FTS5 table itself is defined once, in `lib/fts_schema.py`, because five ingesters write to it and its columns must agree.
 - There is no query tool over the index in this package; `sqlite3 <kb-root>/index.db` is the interface.

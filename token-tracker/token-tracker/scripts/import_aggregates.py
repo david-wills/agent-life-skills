@@ -6,10 +6,11 @@ so every existing report and query works unchanged, with no second code path.
 Ids are deterministic, so re-importing an updated export overwrites rather than
 double-counts.
 
-Known limitation: an aggregate host is day-granular. Its rows are timestamped at
-noon PT, so a quota window that starts or ends mid-day attributes that whole day
-to one side. Fine for daily and weekly reporting; not usable for the 5-hour drift
-regression, which stays on fine-grained local data.
+Known limitation: an aggregate host is day-granular. Its rows are timestamped
+at noon in the tracker's day zone (`lib.day_tz()`), so a quota window that
+starts or ends mid-day attributes that whole day to one side. Fine for daily and
+weekly reporting; not usable for the 5-hour drift regression, which stays on
+fine-grained local data.
 
 Usage:
   import_aggregates.py path/to/export.json   # import one file
@@ -21,13 +22,10 @@ import json
 import os
 import sys
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib
 import collect
-
-PT = ZoneInfo("America/Los_Angeles")
 
 
 def import_doc(con, doc, verbose=True):
@@ -51,7 +49,7 @@ def import_doc(con, doc, verbose=True):
         day, project = r["day"], r["project"]
         model = lib.normalize_model(r["model"]) if provider == "anthropic" else r["model"]
         entry = r.get("entrypoint") or "cli"
-        noon = int(datetime.strptime(day, "%Y-%m-%d").replace(hour=12, tzinfo=PT).timestamp() * 1000)
+        noon = int(datetime.strptime(day, "%Y-%m-%d").replace(hour=12, tzinfo=lib.day_tz()).timestamp() * 1000)
         uuid = f"agg:{host}:{provider}:{day}:{model}:{project}:{entry}"
         sid = f"agg:{host}:{provider}:{day}:{project}"
         if provider == "anthropic":

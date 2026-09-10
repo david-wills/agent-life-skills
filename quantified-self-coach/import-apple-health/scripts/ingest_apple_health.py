@@ -16,6 +16,7 @@ parser) — this ingester only feeds full-text search.
 from __future__ import annotations
 
 import argparse
+import os
 import datetime as dt
 import re
 import sqlite3
@@ -28,6 +29,7 @@ if _LIB is None:
     raise SystemExit("cannot find the repo-root lib/ directory; run from a clone of the repo, not a copied file")
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
+from fts_schema import ENTRIES_DDL as FTS_SCHEMA  # noqa: E402
 
 SOURCE_NAME = "apple-health"
 
@@ -42,26 +44,6 @@ WEEKDAYS = [
 ]
 DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
-
-FTS_SCHEMA = """
-CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
-    id UNINDEXED,
-    source UNINDEXED,
-    source_type UNINDEXED,
-    title,
-    author,
-    url UNINDEXED,
-    readwise_url UNINDEXED,
-    captured_at UNINDEXED,
-    ingested_at UNINDEXED,
-    status UNINDEXED,
-    tags,
-    note,
-    body,
-    path UNINDEXED,
-    tokenize = 'unicode61 remove_diacritics 2'
-);
-"""
 
 
 def _iso_utc_now() -> str:
@@ -228,6 +210,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    os.umask(0o077)  # health data: every file this run creates is owner-only
     args = parse_args()
     if args.kb_root:
         kb_root = Path(args.kb_root).expanduser()

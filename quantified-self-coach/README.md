@@ -182,6 +182,13 @@ lifting days.
 
 ## Honest limits
 
+- **A planning aid, not medical advice.** The coach arranges your own logged
+  numbers into a session. It does not diagnose, it is told never to override
+  pain, a clinician or the injuries in `GOALS.md`, and it picks the lighter
+  option when unsure. You are the one who knows how today feels.
+- **Health files are created owner-only.** Every importer and ingester sets a
+  077 umask before it writes, so new markdown, JSON and the index land as 0600.
+  Files that already exist keep whatever mode they had.
 - **The coach is a prompt, not a program.** `workout-coach` is mostly `SKILL.md`:
   the two scripts bundle context and push a routine, and an agent does the
   composing in between. Without a capable model driving it you have a context

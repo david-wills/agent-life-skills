@@ -2,6 +2,7 @@
 import json
 import os
 import socket
+from zoneinfo import ZoneInfo
 import sqlite3
 import subprocess
 import sys
@@ -48,8 +49,28 @@ def local_host():
     return str(cfg("token_tracker.host", socket.gethostname().split(".")[0]))
 
 
-# Anthropic first-party API list prices, $ per 1M tokens (input, output).
+def day_tz():
+    """The zone that decides which day a timestamp belongs to.
+
+    Config `token_tracker.timezone` (an IANA name such as Europe/Berlin), else
+    None, which datetime treats as the machine's local zone: right across DST
+    for each instant, unlike an offset captured once at import.
+    """
+    name = cfg("token_tracker.timezone", None)
+    if not name:
+        return None
+    try:
+        return ZoneInfo(str(name))
+    except (KeyError, ValueError, OSError):  # ZoneInfoNotFoundError is a KeyError
+        raise SystemExit(f"token_tracker.timezone {name!r} is not an IANA zone name (try Europe/Berlin)") from None
+
+
+# Anthropic first-party API list prices, $ per 1M tokens (input, output), as of
+# PRICES_AS_OF. A cost report is only as current as this table: check
+# https://www.anthropic.com/pricing before trusting a dollar figure, and bump the
+# date when you edit a row.
 # Cache write 5m = 1.25x input, cache write 1h = 2x input, cache read = 0.1x input.
+PRICES_AS_OF = "2026-06"
 PRICES = {
     "claude-fable-5-1":  (10.0, 50.0),
     "claude-fable-5":    (10.0, 50.0),
@@ -61,7 +82,7 @@ PRICES = {
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5":  (1.0, 5.0),
 }
-DEFAULT_PRICE = (5.0, 25.0)  # unknown model -> assume Opus tier, flagged in report
+DEFAULT_PRICE = (5.0, 25.0)  # unknown Anthropic model -> Opus tier; report.py names them (see unpriced)
 
 CACHE_WRITE_5M_MULT = 1.25
 CACHE_WRITE_1H_MULT = 2.0
@@ -123,6 +144,11 @@ def normalize_model(model: str) -> str:
     return m
 
 
+def unpriced(models):
+    """The models in `models` that cost_usd() prices at DEFAULT_PRICE, sorted."""
+    return sorted({m for m in models if normalize_model(m) not in PRICES})
+
+
 def cost_usd(model, inp, out, cache_read, cw5m, cw1h):
     """API-equivalent cost in USD for one usage record."""
     m = normalize_model(model)
@@ -181,7 +207,7 @@ CREATE TABLE IF NOT EXISTS messages (
   session_id      TEXT NOT NULL,
   project         TEXT,
   ts              INTEGER NOT NULL,          -- epoch ms, UTC
-  day             TEXT NOT NULL,             -- YYYY-MM-DD, America/Los_Angeles
+  day             TEXT NOT NULL,             -- YYYY-MM-DD in lib.day_tz()
   model           TEXT,
   entrypoint      TEXT,                      -- 'sdk-cli' (an agent harness) | 'cli' (terminal)
   is_sidechain    INTEGER DEFAULT 0,

@@ -13,7 +13,6 @@ import argparse
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib
@@ -21,7 +20,6 @@ import collect
 import offmachine
 import quota as quota_mod
 
-PT = ZoneInfo("America/Los_Angeles")
 
 
 # ---------------------------------------------------------------- quota model
@@ -175,11 +173,11 @@ def build(con, day=None, week=False):
     if week and window:
         where = "ts >= ? AND ts < ?"
         args = (int(window[0].timestamp() * 1000), int(window[1].timestamp() * 1000))
-        title = f"Token report — 7-day quota window (through {datetime.now(PT):%b %-d %-I:%M%p})"
+        title = f"Token report — 7-day quota window (through {datetime.now(lib.day_tz()):%b %-d %-I:%M%p})"
     else:
-        day = day or datetime.now(PT).strftime("%Y-%m-%d")
+        day = day or datetime.now(lib.day_tz()).strftime("%Y-%m-%d")
         where, args = "day = ?", (day,)
-        label = "today" if day == datetime.now(PT).strftime("%Y-%m-%d") else day
+        label = "today" if day == datetime.now(lib.day_tz()).strftime("%Y-%m-%d") else day
         title = f"Token report — {day}" + (" (so far)" if label == "today" else "")
 
     where_claude = f"({where}) AND provider='anthropic'"
@@ -233,7 +231,7 @@ def build(con, day=None, week=False):
                      "change). The rate is calibrated on usage since that reset, so "
                      "window totals above it are not comparable to the live figure.")
         if q.get("seven_day_reset"):
-            reset = datetime.fromisoformat(q["seven_day_reset"].replace("Z", "+00:00")).astimezone(PT)
+            reset = datetime.fromisoformat(q["seven_day_reset"].replace("Z", "+00:00")).astimezone(lib.day_tz())
             L.append(f"· weekly resets {reset:%a %b %-d %-I:%M%p}")
         L.append("")
 
@@ -283,6 +281,14 @@ def build(con, day=None, week=False):
                      f"({om['n_intervals']}/{offmachine.MIN_INTERVALS} intervals)")
         if om["unseen_models"]:
             L.append("· ⇒ quota percentages above are **upper bounds**; dollar costs are exact.")
+
+    # Models the price table does not know are costed at the Opus tier. Say so,
+    # rather than let a guess read as a fact.
+    unpriced = lib.unpriced(m for (m,) in con.execute(
+        f"SELECT DISTINCT model FROM messages WHERE {where_claude}", args))
+    if unpriced:
+        L.append(f"· _unpriced: {', '.join(unpriced)} — costed at the Opus tier; "
+                 f"price table as of {lib.PRICES_AS_OF}, add them to PRICES in lib.py_")
 
     # Codex runs on a separate ChatGPT plan with its own limits; merging its
     # percentages into Claude's would be meaningless.
@@ -367,7 +373,7 @@ def main():
 
     day = a.day
     if a.yesterday and not day:
-        day = (datetime.now(PT) - timedelta(days=1)).strftime("%Y-%m-%d")
+        day = (datetime.now(lib.day_tz()) - timedelta(days=1)).strftime("%Y-%m-%d")
     text = build(con, day=day, week=a.week)
     print(text)
     if not a.no_post:

@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import hmac
 import json
 import logging
@@ -166,6 +167,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    os.umask(0o077)  # health data: every file this run creates is owner-only
     args = parse_args()
     _setup_logging()
 

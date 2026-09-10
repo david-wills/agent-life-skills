@@ -70,7 +70,8 @@ PACKAGES: dict[str, dict[str, list[tuple]]] = {
         "os": [("Darwin", OPT, "the default Chrome path is macOS; set CHROME_PATH elsewhere")],
     },
     "token-tracker": {
-        "config": [("discord.channels.token_tracker", REQ, ""), ("token_tracker.host", OPT, "label for this machine's rows; defaults to the short hostname")],
+        "config": [("discord.channels.token_tracker", REQ, ""), ("token_tracker.host", OPT, "label for this machine's rows; defaults to the short hostname"),
+                   ("token_tracker.timezone", OPT, "IANA zone that defines a day; defaults to the machine's local zone")],
         "secret": [("DISCORD_BOT_TOKEN", REQ, "")],
         "binary": [("security", OPT, "macOS keychain; quota sampling reads the Claude Code login from it")],
         "module": [],

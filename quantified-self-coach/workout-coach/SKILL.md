@@ -6,6 +6,8 @@ compatibility: Runs inside an agent runtime bound to a Discord channel. Requires
 
 # Workout Coach
 
+**A planning aid, not medical advice.** It never overrides pain, a clinician's instruction or the injuries in GOALS.md, and when in doubt it picks the lighter option.
+
 ## When to invoke
 
 Conversational, not a slash command. Invoke this skill when the user sends a
@@ -47,10 +49,11 @@ python3 quantified-self-coach/workout-coach/scripts/build_context.py
 ## Composing the session
 
 ### Slot selection
-- **Mon →** Upper body.
-- **Tue or Wed →** Lower body. If one is already logged this week, the other is rest (unless the user says otherwise).
-- **Thu / Sat / Sun →** Flex / make-up. Pick whichever of UB/LB hasn't been hit in 4+ days. If both are recent, offer a lighter version or suggest rest.
-- **Fri →** Trainer day. Politely defer — "that's your trainer day; I don't plan those."
+GOALS.md's Cadence table decides; this file only says how to read it:
+- A day mapped to one slot → that slot.
+- Days sharing a slot ("Tue *or* Wed") → the slot if it is not logged yet this week; otherwise rest, unless the user says otherwise.
+- A flex day → whichever slot is 4+ days stale. If all are recent, offer a lighter version or suggest rest.
+- A day the table gives to someone else (a trainer day) → politely defer: "that's your trainer day; I don't plan those."
 - If the user's message overrides ("I want lower today"), trust them.
 
 ### Exercise picks — 3★ / 2 unmarked split
@@ -68,13 +71,12 @@ Variety matters on **two independent axes** — apply both when planning the nex
 Practical rule: before picking this session's 4-6 patterns, list the patterns hit in the last same-slot session. Prefer the *complement* set this time, while still respecting the 3★/2 unmarked split and gap-filling forcing functions.
 
 ### Sets, reps, weight
-- **Default rep range:** 8-15 (per PROGRAM.md). Bias lower (8-10) for compound lifts, higher (12-15) for isolation.
-- **Default RPE:** 7-8 (2-3 reps in the tank).
+- **Rep range, RPE, working sets, rest and the progression rule** come from PROGRAM.md's Defaults table, including its compound-versus-isolation bias. The user's message can override any of them for today.
+- **Units:** weights are in lb throughout. Hevy stores kg; the ingester converts at import, so the context bundle and the briefing agree. The plan JSON takes `weight_lb` or `weight_kg`.
 - **Weight inference (date-based — judge against `last_date` in the context bundle):**
-  - **≤30 days old:** use the weight. If `top_reps` was at the top of the rep range across all working sets, apply the **progression rule**: +5 lb (or next dumbbell).
+  - **≤30 days old:** use the weight. If `top_reps` was at the top of the rep range across all working sets, apply PROGRAM.md's progression rule.
   - **31-90 days old:** use the weight, hold (no progression). Flag in the rationale: `(_last: <date>, <W>×<R> — coming back after N weeks_)`.
-  - **>90 days old, OR no entry:** treat as effectively NEW. Suggest a conservative start (e.g. 30-40 lb DB for pressing, 25-30 lb DB for laterals) and call it "NEW" in the rationale. Don't anchor on a multi-month-old number — strength likely drifted.
-- **Sets:** 3 working sets per exercise unless the user requests otherwise.
+  - **>90 days old, OR no entry:** treat as effectively NEW. Suggest a conservative start — the lightest load a trained adult would still call a working set for that movement — and call it "NEW" in the rationale. Don't anchor on a multi-month-old number — strength likely drifted.
 
 The context bundle's `last_performance` covers up to 365 days back, so the coach sees stale entries — apply the staleness rules above; don't blindly trust everything in the list.
 
@@ -163,9 +165,8 @@ Three `<EDIT:>` placeholders may still be unfilled: **injuries**, **love/hate ex
 
 ## Do nots
 
-- **No cardio prescriptions** (walks, zone-2, HIIT). Out of scope.
-- **No nutrition commentary** (calories, macros, deficit). Out of scope.
-- **Do not plan Friday sessions** — that's the trainer's job.
+- **Stay inside GOALS.md's "Out of scope" list.** The shipped template excludes cardio, nutrition and trainer days; whatever the user's copy says is the rule.
+- **Do not plan days the Cadence table gives to someone else** (a trainer day).
 - **Do not push toward higher frequency.** GOALS.md states the weekly cadence; older Hevy data showing more sessions per week is prior cadence, not a target.
 - **Do not nag about missed days.** If they skipped a week, just propose today's session.
 - **No slash commands.** All triggers are natural language in the channel.
@@ -174,7 +175,7 @@ Three `<EDIT:>` placeholders may still be unfilled: **injuries**, **love/hate ex
 
 - **Surface: the Discord channel in `discord.channels.workouts`.** Two paths land here:
   - **Interactive path** — the user asks "what should I do today?" etc.; compose the briefing per this skill and reply in-channel.
-  - **Proactive path** — a scheduled job for each solo slot (the Monday UB and the midweek LB, at whatever hour you leave for the gym) runs the same composition unprompted and posts it via `lib/discord.py` (`send_message` handles the 2000-character split and embed suppression). The job's prompt is self-contained: build context, read GOALS.md and PROGRAM.md, compose, post, then push.
+  - **Proactive path** — a scheduled job for each solo slot in GOALS.md's Cadence table, at whatever hour you leave for the gym, runs the same composition unprompted and posts it via `lib/discord.py` (`send_message` handles the 2000-character split and embed suppression). The job's prompt is self-contained: build context, read GOALS.md and PROGRAM.md, compose, post, then push.
 - The briefing's `**double asterisks**` bold + `_italic_` render natively in Discord; no conversion step.
 
 ## Sync to Hevy on the phone

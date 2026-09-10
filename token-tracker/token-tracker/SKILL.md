@@ -12,7 +12,8 @@ quota it burned** — broken out by workflow and by model.
 
 Output goes to Discord **#token-tracker** (`discord.channels.token_tracker`
 in the repo-root `config.json`). This machine's rows are labelled with
-`token_tracker.host` (default `this-mac`).
+`token_tracker.host` (default `this-mac`). A day is cut in `token_tracker.timezone`
+(an IANA name; unset means this machine's local zone).
 
 ## Where the numbers come from
 
@@ -106,7 +107,12 @@ python3 export_aggregates.py --host laptop --out ~/Desktop/laptop-tokens.json
 ```
 
 It emits per (day, model, project) token totals for Claude and Codex — no
-prompts, responses, code, or session ids. Bring the file here and import it:
+prompts, responses, code, or session ids. A project name is the transcript
+directory name, which embeds the path and usually a username; `--redact-projects`
+replaces each with a stable hash so the breakdown survives and the path does not.
+Days are cut in that machine's local zone unless `--timezone` says otherwise;
+match it to this machine's `token_tracker.timezone`. Bring the file here and
+import it:
 
 ```bash
 python3 token-tracker/token-tracker/scripts/import_aggregates.py ~/Desktop/laptop-tokens.json
@@ -159,6 +165,8 @@ python3 $S/offmachine.py                 # how much quota burn isn't from this m
 python3 export_aggregates.py --host laptop --out ~/Desktop/laptop-tokens.json
 #   --projects DIR   transcript root (default ~/.claude/projects)
 #   --no-codex       skip Codex rollouts
+#   --timezone ZONE  IANA zone that defines a day (default: that machine's local zone)
+#   --redact-projects  hash project names (they embed the transcript path)
 ```
 
 For ad-hoc questions, query the DB directly — it is plain SQLite at

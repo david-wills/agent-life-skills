@@ -34,6 +34,7 @@ CLI:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
@@ -511,6 +512,7 @@ def ingest_payload(
 
 
 def main() -> int:
+    os.umask(0o077)  # health data: every file this run creates is owner-only
     import argparse
 
     p = argparse.ArgumentParser(description="Merge one HAE JSON file into the per-day markdown + sidecar.")

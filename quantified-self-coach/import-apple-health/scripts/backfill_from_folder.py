@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 import time
@@ -38,6 +39,7 @@ def _iter_payload_files(folder: Path) -> list[Path]:
 
 
 def main() -> int:
+    os.umask(0o077)  # health data: every file this run creates is owner-only
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("folder", type=Path, help="Folder to walk for HAE JSON exports (recursive).")
     p.add_argument("--out-dir", type=Path, default=None,

@@ -9,6 +9,8 @@ Resolution order for ``cfg("discord.channels.reading_list")``:
 
     1. Env var ``SKILLS_DISCORD_CHANNELS_READING_LIST`` (dots -> underscores, upper).
        Lets a single cron or a test override one value without editing a file.
+       Values are strings, except that one starting with ``{`` or ``[`` is parsed
+       as JSON, so a structured key such as ``user.home`` can be set the same way.
     2. ``config.local.json`` at the repo root: gitignored, wins over config.json.
     3. ``config.json`` at the repo root: gitignored too. Copy config.example.json
        to it and fill in the keys the packages you run need.
@@ -139,6 +141,17 @@ def _find_placeholder(node: Any) -> tuple[str, str] | None:
     return None
 
 
+def _decode_env(path: str, raw: str) -> Any:
+    """An env value is a string unless it looks like a JSON object or array."""
+    text = raw.strip()
+    if text[:1] not in ("{", "["):
+        return raw
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"{_env_name(path)} starts with {text[0]!r} but is not valid JSON: {exc}") from None
+
+
 def lookup(path: str) -> tuple[str, Any]:
     """Resolve a key without defaults: ('env'|'config'|'placeholder'|'missing', value).
 
@@ -147,9 +160,14 @@ def lookup(path: str) -> tuple[str, Any]:
     """
     env = os.environ.get(_env_name(path))
     if env is not None:
-        return ("placeholder", env.strip()) if is_placeholder(env) else ("env", env)
+        node = _decode_env(path, env)
+        hit = _find_placeholder(node)
+        if hit:
+            sub, value = hit
+            return "placeholder", f"{value} (at {path}.{sub})" if sub else value
+        return "env", node
 
-    node: Any = _load()
+    node = _load()
     for part in path.split("."):
         if isinstance(node, dict) and part in node:
             node = node[part]

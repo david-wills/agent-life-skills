@@ -159,6 +159,7 @@ def _read_watermark(path: Path) -> dt.datetime | None:
 
 
 def main() -> int:
+    os.umask(0o077)  # health data: every file this run creates is owner-only
     args = parse_args()
     token = _resolve_token(args.token)
 

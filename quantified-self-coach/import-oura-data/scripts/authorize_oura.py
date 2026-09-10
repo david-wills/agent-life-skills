@@ -131,6 +131,7 @@ def _write_tokens(path: pathlib.Path, payload: dict) -> None:
 
 
 def main() -> int:
+    os.umask(0o077)  # health data: every file this run creates is owner-only
     global _expected_state
     args = _parse_args()
     if args.output:

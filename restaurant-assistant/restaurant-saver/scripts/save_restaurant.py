@@ -2,6 +2,12 @@
 """Intake: turn anything the user drops in #restaurants into a tracked row.
 
     save_restaurant.py "<name | maps url | article url>" [--note ...] [--status ...]
+    save_restaurant.py --stdin <<'EOF'
+    {"query": "...", "note": "...", "source_raw": "...", "status": "want_to_go"}
+    EOF
+
+Use --stdin for anything that came out of a chat message: a quote, a backtick
+or a `$(` in someone's text must never be spliced into a shell command line.
 
 Resolve, enrich and store happen in ONE browser session rather than three
 separate Playwright launches — that is most of the difference between a
@@ -27,9 +33,38 @@ from browser import maps_context  # noqa: E402
 from enrich_place import drive_from_home, place_details  # noqa: E402
 
 
+STDIN_FIELDS = ("query", "note", "source_url", "source_raw", "status")
+
+
+def read_stdin_request(stream) -> tuple[dict | None, str | None]:
+    """Parse the --stdin JSON object. Returns (request, None) or (None, error code)."""
+    try:
+        payload = json.load(stream)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, "bad_stdin_json"
+    if not isinstance(payload, dict) or not str(payload.get("query") or "").strip():
+        return None, "stdin_needs_query"
+    unknown = set(payload) - set(STDIN_FIELDS)
+    if unknown:
+        return None, "stdin_unknown_field:" + ",".join(sorted(unknown))
+    status = payload.get("status") or rc.STATUS_WANT
+    if status not in (rc.STATUS_WANT, rc.STATUS_BEEN, rc.STATUS_FAVORITE):
+        return None, "bad_status"
+    return {
+        "query": str(payload["query"]).strip(),
+        "note": str(payload.get("note") or ""),
+        "source_url": payload.get("source_url") or None,
+        "source_raw": payload.get("source_raw") or None,
+        "status": status,
+    }, None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Resolve, enrich and store one restaurant.")
-    ap.add_argument("query", help="Name, Maps URL, or article URL")
+    ap.add_argument("query", nargs="?", help="Name, Maps URL, or article URL (omit with --stdin)")
+    ap.add_argument("--stdin", action="store_true",
+                    help="read one JSON object {query, note, source_url, source_raw, status} from stdin; "
+                         "use it for chat-derived text so nothing from a message reaches a shell")
     ap.add_argument("--note", default="", help="Why the user saved it")
     ap.add_argument("--source-url", default=None, help="Article/link it came from")
     ap.add_argument("--source-raw", default=None, help="The user's raw message")
@@ -39,6 +74,15 @@ def main() -> int:
     ap.add_argument("--skip-drive", action="store_true", help="Skip the drive-time lookup")
     ap.add_argument("--watch", action="store_true", help="Run with a visible browser window")
     args = ap.parse_args()
+    if args.stdin:
+        req, err = read_stdin_request(sys.stdin)
+        if err:
+            print(json.dumps({"kind": "error", "error": err}))
+            return 1
+        for k, v in req.items():
+            setattr(args, k, v)
+    elif not args.query:
+        ap.error("query is required unless --stdin is given")
 
     with maps_context(headless=not args.watch) as ctx:
         resolved = rp.resolve_in_context(ctx, args.query, top=args.top)

@@ -244,6 +244,7 @@ def _resolve_window(args: argparse.Namespace) -> tuple[str, str]:
 
 
 def main() -> int:
+    os.umask(0o077)  # health data: every file this run creates is owner-only
     args = parse_args()
     from skill_config import data_root
 

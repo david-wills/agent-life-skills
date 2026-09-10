@@ -7,6 +7,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+from zoneinfo import ZoneInfo
 
 import support
 
@@ -35,6 +37,10 @@ class Ingest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # Day boundaries follow token_tracker.timezone; pin it so CI in UTC agrees.
+        env = mock.patch.dict(os.environ, {"SKILLS_TOKEN_TRACKER_TIMEZONE": "America/Los_Angeles"})
+        env.start()
+        self.addCleanup(env.stop)
         # collect derives the project name from the path segment after /projects/.
         self.root = Path(self.tmp.name) / "projects"
         self.file = self.root / "-Users-me-proj" / "s1.jsonl"
@@ -108,10 +114,16 @@ class Ingest(unittest.TestCase):
         self.ingest()
         self.assertEqual([r[0] for r in self.rows()], ["u4"])
 
-    def test_day_is_pacific_and_project_is_the_path_segment(self):
+    def test_day_follows_the_configured_zone_and_project_is_the_path_segment(self):
         self.file.write_text(rec("u1", "req_A", "2025-09-12T03:30:00Z"))
         self.ingest()
         self.assertEqual(self.rows(), [("u1", "req_A", "2025-09-11", "-Users-me-proj")])
+
+    def test_another_zone_cuts_the_day_elsewhere(self):
+        self.file.write_text(rec("u1", "req_A", "2025-09-12T03:30:00Z"))
+        with mock.patch.dict(os.environ, {"SKILLS_TOKEN_TRACKER_TIMEZONE": "Europe/Berlin"}):
+            self.ingest()
+        self.assertEqual([r[2] for r in self.rows()], ["2025-09-12"])
 
     def test_subagent_transcripts_are_included(self):
         sub = self.file.parent / "s1" / "subagents" / "agent-1.jsonl"
@@ -154,3 +166,32 @@ class Pricing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Prices(unittest.TestCase):
+    def test_unpriced_names_models_outside_the_table(self):
+        self.assertEqual(lib.unpriced(["claude-opus-5", "claude-opus-5-20260101", "claude-next-9", "claude-next-9"]),
+                         ["claude-next-9"])
+        self.assertRegex(lib.PRICES_AS_OF, r"^\d{4}-\d{2}$")
+
+
+class Export(unittest.TestCase):
+    """export_aggregates is standalone (no lib), so its zone and redaction are flags."""
+
+    def setUp(self):
+        import export_aggregates
+        self.mod = export_aggregates
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "projects"
+        f = self.root / "-Users-me-proj" / "s1.jsonl"
+        f.parent.mkdir(parents=True)
+        f.write_text(rec("u1", "req_A", "2025-09-12T03:30:00Z"))
+
+    def test_zone_and_redaction(self):
+        rows = self.mod.collect(str(self.root), tz=ZoneInfo("America/Los_Angeles"))
+        self.assertEqual((rows[0]["day"], rows[0]["project"]), ("2025-09-11", "-Users-me-proj"))
+        rows = self.mod.collect(str(self.root), tz=ZoneInfo("Europe/Berlin"), redact=True)
+        self.assertEqual(rows[0]["day"], "2025-09-12")
+        self.assertRegex(rows[0]["project"], r"^[0-9a-f]{12}$")
+        self.assertNotIn("me", rows[0]["project"])

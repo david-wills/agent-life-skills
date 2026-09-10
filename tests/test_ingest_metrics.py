@@ -195,6 +195,8 @@ class Cli(unittest.TestCase):
             con = sqlite3.connect(kb / "index.db")
             self.assertEqual(con.execute("SELECT COUNT(*) FROM metrics_daily").fetchone()[0], 1)
             con.close()
+            if os.name == "posix":
+                self.assertEqual((kb / "index.db").stat().st_mode & 0o077, 0, "health data must be owner-only")
             with mock.patch("sys.argv", argv[:-1] + ["--since", "nope"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(im.main(), 2)
 

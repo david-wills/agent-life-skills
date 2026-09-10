@@ -120,3 +120,25 @@ class CalendarWindows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StdinIntake(unittest.TestCase):
+    def read(self, text: str):
+        import io
+        import save_restaurant
+        return save_restaurant.read_stdin_request(io.StringIO(text))
+
+    def test_full_request(self):
+        req, err = self.read('{"query": " Casa Invent ", "note": "a friend\u2019s tip", "source_raw": "$(rm -rf /) `x`", "status": "been"}')
+        self.assertIsNone(err)
+        self.assertEqual(req["query"], "Casa Invent")
+        self.assertEqual(req["status"], "been")
+        self.assertEqual(req["source_raw"], "$(rm -rf /) `x`")
+        self.assertIsNone(req["source_url"])
+
+    def test_errors_are_codes(self):
+        self.assertEqual(self.read("{nope")[1], "bad_stdin_json")
+        self.assertEqual(self.read('["Casa"]')[1], "stdin_needs_query")
+        self.assertEqual(self.read('{"note": "x"}')[1], "stdin_needs_query")
+        self.assertEqual(self.read('{"query": "x", "status": "maybe"}')[1], "bad_status")
+        self.assertEqual(self.read('{"query": "x", "watch": true}')[1], "stdin_unknown_field:watch")

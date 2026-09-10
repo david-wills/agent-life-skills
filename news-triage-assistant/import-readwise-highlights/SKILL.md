@@ -62,5 +62,5 @@ On demand, or daily if you want the index to track your highlighting. The author
 
 - Endpoint: `GET https://readwise.io/api/v2/export/`; use `updatedAfter` for incremental syncs and follow `nextPageCursor` until none remains.
 - Keep the raw JSON even if you plan to process the highlights later; the ingester also accepts the older books-only shape and flattens it on the fly.
-- The small helpers (`_slug`, ISO parsing, the FTS schema, frontmatter rendering) are duplicated between this skill and `import-reader-archive` on purpose, so each skill stands alone.
+- The small helpers (`_slug`, ISO parsing, frontmatter rendering) are duplicated between this skill and `import-reader-archive` on purpose, so each skill stands alone. The FTS5 table itself is defined once, in `lib/fts_schema.py`, because five ingesters write to it and its columns must agree.
 - There is no query tool over the index in this package; `sqlite3 <kb-root>/index.db` is the interface.

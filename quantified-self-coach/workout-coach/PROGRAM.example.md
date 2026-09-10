@@ -23,6 +23,7 @@ here.
 
 | Setting | Value |
 | --- | --- |
+| Units | lb. The pipeline's unit: Hevy stores kg and the ingester converts. Plan JSON also accepts `weight_kg` |
 | Rep range | 8-15 — bias 8-10 on compounds, 12-15 on isolation |
 | Working sets | 3 |
 | RPE | 7-8 (2-3 reps in reserve) |

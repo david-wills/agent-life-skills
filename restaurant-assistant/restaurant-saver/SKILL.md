@@ -41,13 +41,18 @@ any of those plus a note ("Casa Invent — a friend's been asking", "went here, 
 the branzino"). Parse intent, then run one command:
 
 ```bash
-python3 $S/save_restaurant.py "<name|url>" \
-    --note "<why they saved it>" --source-raw "<their raw message>"
+python3 $S/save_restaurant.py --stdin <<'EOF'
+{"query": "<name|url>", "note": "<why they saved it>", "source_raw": "<their raw message>"}
+EOF
 ```
 
-Flags: `--note`, `--source-url`, `--source-raw`, `--status {want_to_go,been,favorite}`,
+Chat text goes in as JSON on stdin, never on the command line: a quote, a
+backtick or a `$(` inside someone's message must not reach a shell. JSON-escape
+the strings. Fields: `query` (required), `note`, `source_url`, `source_raw`,
+`status` (`want_to_go` default, `been`, `favorite`). Flags that are not text:
 `--top N` (candidates for a name search, default 3), `--skip-drive`, `--watch`
-(visible browser).
+(visible browser). The positional form, `save_restaurant.py "<name|url>"
+--note ...`, exists for typing at a terminal.
 
 Intent → `--status`:
 - default → `want_to_go`
@@ -184,6 +189,7 @@ function that knows the CLI.
 | resolve / save | `maps_url_unresolved` | Maps link didn't land on a place page | Ask for the name instead |
 | resolve / save | `unsupported_url_host` | IG / TikTok / YouTube / X link | Ask for a name or a real article |
 | resolve / save | `no_name_extracted` | Article had no title-shaped place name | Ask the user for the name |
+| `save_restaurant.py --stdin` | `bad_stdin_json` / `stdin_needs_query` / `bad_status` / `stdin_unknown_field:<name>` | The JSON on stdin was malformed, had no `query`, an unknown `status`, or a field the script does not take | Fix the payload; the fields are listed under Intake |
 | resolve / save | `no_maps_results` | Search found nothing | Ask for city/neighborhood |
 | `enrich_place.py` | `not_a_place_page` | URL isn't a `/maps/place/` page | Resolve first, then enrich |
 | `post_suggestions.py` | `no_picks` | Empty `picks` | Fix the payload |
@@ -213,7 +219,7 @@ profile. Only one browser script per profile at a time — check with
 S=restaurant-assistant/restaurant-saver/scripts
 
 python3 $S/login.py                                       # one-time visible sign-in
-python3 $S/save_restaurant.py "Casa Invent" --note "a friend asked"   # intake
+echo '{"query": "Casa Invent", "note": "a friend asked"}' | python3 $S/save_restaurant.py --stdin   # intake
 python3 $S/resolve_place.py "Casa Invent"                 # resolve only
 python3 $S/enrich_place.py "<maps url>"                   # re-enrich one place
 python3 $S/plan_thursday.py --weeks 4                     # free Thursdays + shortlist

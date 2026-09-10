@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to config.json and fill in the keys for the packages you run; python3 doctor.py lists what is still missing. Values left as they are here (CHANNEL_ID, USER_ID, you@example.com) count as unset. config.json and config.local.json are both gitignored; put per-machine overrides in config.local.json. Any value can also be set as an env var: SKILLS_<DOTTED_KEY_UPPER>, e.g. SKILLS_DISCORD_CHANNELS_READING_LIST. Secrets (bot tokens, API keys) never go here; see lib/read_secret.py.",
+  "_comment": "Copy to config.json and fill in the keys for the packages you run; python3 doctor.py lists what is still missing. Values left as they are here (CHANNEL_ID, USER_ID, you@example.com) count as unset. config.json and config.local.json are both gitignored; put per-machine overrides in config.local.json. Any value can also be set as an env var: SKILLS_<DOTTED_KEY_UPPER>, e.g. SKILLS_DISCORD_CHANNELS_READING_LIST; a value starting with { or [ is parsed as JSON, so structured keys like user.home work too. Secrets (bot tokens, API keys) never go here; see lib/read_secret.py.",
 
   "user": {
     "display_name": "YOUR_NAME",
@@ -52,8 +52,9 @@
   },
 
   "token_tracker": {
-    "_comment": "host labels this machine's rows; inbox is an optional drop folder where other machines leave counts-only exports; openai_prices is optional {model: [input, output]} $/MTok for Codex cost.",
+    "_comment": "host labels this machine's rows; timezone is the IANA zone that defines a day (empty: this machine's local zone); inbox is an optional drop folder where other machines leave counts-only exports; openai_prices is optional {model: [input, output]} $/MTok for Codex cost.",
     "host": "this-mac",
+    "timezone": "",
     "inbox": "",
     "openai_prices": {}
   }

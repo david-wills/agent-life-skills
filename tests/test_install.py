@@ -180,3 +180,27 @@ class LinkSkills(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnvValues(unittest.TestCase):
+    def test_plain_env_values_stay_strings(self):
+        with mock.patch.dict(os.environ, {"SKILLS_USER_DISPLAY_NAME": "42"}):
+            self.assertEqual(sc.lookup("user.display_name"), ("env", "42"))
+
+    def test_json_object_in_env_sets_a_structured_key(self):
+        home = {"label": "Home", "address": "1 Main St", "lat": 1.5, "lng": -2.0}
+        with mock.patch.dict(os.environ, {"SKILLS_USER_HOME": json.dumps(home)}):
+            self.assertEqual(sc.cfg("user.home"), home)
+
+    def test_placeholder_inside_json_env_counts_as_unset(self):
+        home = {"label": "Home", "address": "STREET, CITY, ST ZIP", "lat": 0.0, "lng": 0.0}
+        with mock.patch.dict(os.environ, {"SKILLS_USER_HOME": json.dumps(home)}):
+            state, value = sc.lookup("user.home")
+            self.assertEqual(state, "placeholder")
+            self.assertIn("address", value)
+            self.assertEqual(sc.cfg("user.home", "fallback"), "fallback")
+
+    def test_malformed_json_env_is_a_config_error(self):
+        with mock.patch.dict(os.environ, {"SKILLS_USER_HOME": "{not json"}):
+            with self.assertRaises(sc.ConfigError):
+                sc.lookup("user.home")

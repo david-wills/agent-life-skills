@@ -81,9 +81,13 @@ once it completed; storing the start of the unparsed line picks it up next pass.
 
 - Config keys: `discord.channels.token_tracker`; `token_tracker.host` (the label
   on this machine's rows, default `this-mac`; any other machine's export must
-  use a different one); optionally `token_tracker.inbox` (a folder where other
-  machines drop counts-only exports) and `token_tracker.openai_prices` (left
-  unset, Codex cost shows as zero rather than a guessed number).
+  use a different one); optionally `token_tracker.timezone` (the IANA zone a
+  day is cut in, default this machine's local zone), `token_tracker.inbox` (a
+  folder where other machines drop counts-only exports) and
+  `token_tracker.openai_prices` (left unset, Codex cost shows as zero rather
+  than a guessed number). Anthropic prices live in `lib.py` with an as-of date;
+  a model the table does not know is costed at the Opus tier and named in the
+  report.
 - Schedule `sample.py` every 30 minutes and `report.py --yesterday` once a day,
   with launchd or cron. No model calls, so no agent scheduler is needed.
 - The database is plain SQLite at `<data_root>/token-tracker/tokens.db`.

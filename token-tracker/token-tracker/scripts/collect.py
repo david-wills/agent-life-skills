@@ -27,12 +27,10 @@ import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib
 
-PT = ZoneInfo("America/Los_Angeles")
 
 
 def iso_to_ms(s):
@@ -45,7 +43,7 @@ def iso_to_ms(s):
 
 
 def day_of(ms):
-    return datetime.fromtimestamp(ms / 1000, timezone.utc).astimezone(PT).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).astimezone(lib.day_tz()).strftime("%Y-%m-%d")
 
 
 def ingest(con, verbose=False, root=None, host=None):

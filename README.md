@@ -59,7 +59,8 @@ budget and checks every gate against the requirement table in `doctor.py`.
 1. `cp config.example.json config.json` and fill in the keys the packages you
    want use. Each package README lists them, and `python3 doctor.py` reports
    which are still missing. `config.json` is gitignored. Any value can also
-   come from an env var, `SKILLS_<DOTTED_KEY_UPPER>`. A key still holding a
+   come from an env var, `SKILLS_<DOTTED_KEY_UPPER>`; a value starting with `{`
+   or `[` is parsed as JSON, so structured keys like `user.home` work too. A key still holding a
    placeholder from the example (`CHANNEL_ID`, `USER_ID`, `you@example.com`)
    counts as unset: it never reaches Discord as a channel called CHANNEL_ID.
 2. Secrets never live in config. `lib/read_secret.py` resolves them at runtime
@@ -75,8 +76,8 @@ budget and checks every gate against the requirement table in `doctor.py`.
    have none. Python 3.11+.
 
 `lib/` is small on purpose: config resolution, secret resolution, a Discord
-transport, a Claude CLI wrapper, a SQLite state helper, and an HTML-to-text
-converter. Nothing else is shared.
+transport, a Claude CLI wrapper, a SQLite state helper, the FTS5 schema the five
+ingesters share, and an HTML-to-text converter. Nothing else is shared.
 
 ## Check the machine
 

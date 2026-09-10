@@ -23,12 +23,10 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib
 
-PT = ZoneInfo("America/Los_Angeles")
 
 
 def iso_ms(s):
@@ -117,7 +115,7 @@ def ingest(con, verbose=True):
                     if not (inp or out):
                         continue
                     m = model or "gpt-unknown"
-                    day = datetime.fromtimestamp(ts / 1000, timezone.utc).astimezone(PT).strftime("%Y-%m-%d")
+                    day = datetime.fromtimestamp(ts / 1000, timezone.utc).astimezone(lib.day_tz()).strftime("%Y-%m-%d")
                     n += 1
                     rows.append((
                         f"codex:{sid}:{n}", sid, f"codex-{kind}" + (f"-{agent}" if agent else ""),
