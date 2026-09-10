@@ -67,6 +67,15 @@ Two runtimes appear in the docs:
 transport, a Claude CLI wrapper, a SQLite state helper, and an HTML-to-text
 converter. Nothing else is shared.
 
+## Tests
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+Stdlib `unittest`, no network: Discord is replaced by an in-memory fake in
+`tests/support.py`. pytest runs the same files if you prefer it.
+
 ## What is deliberately not here
 
 The work-side skills (meeting synthesis, email ingest, Slack triage, a work

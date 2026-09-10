@@ -5,6 +5,10 @@ The sweep never books. It resolves reactions into state and hands the agent an
 explicit ``to_book`` work list — booking is an external, hard-to-reverse action
 and this package deliberately stops at the intent.
 
+Only reactions by the configured owner (``discord.user_id``) count; the bot's
+own seed and anyone else's clicks are ignored, so the bot can sit in a shared
+server.
+
 A card whose reactions cannot be read (deleted message, expired token) is
 reported in ``errors`` and makes the exit code non-zero. It is never counted
 as "no reaction".
@@ -27,7 +31,8 @@ if _LIB is None:
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from discord import DiscordError, fetch_message_reactions, get_discord_token, strip_variation_selectors  # noqa: E402
+from discord import DiscordError, fetch_message_reactions, get_discord_token, strip_variation_selectors, validate_user_id  # noqa: E402
+from skill_config import ConfigError, cfg  # noqa: E402
 
 BOOK_EMOJI = "✅"
 CANCEL_EMOJI = "❌"
@@ -43,6 +48,12 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="Report without updating suggestion state")
     args = ap.parse_args()
 
+    try:
+        user_id = validate_user_id(cfg("discord.user_id"))
+    except (ConfigError, DiscordError) as exc:
+        print(f"not swept: {exc}", file=sys.stderr)
+        return 2
+
     conn = rc.connect()
     rows = conn.execute(
         "SELECT s.*, r.name, r.reservation_platform, r.reservation_url "
@@ -55,7 +66,7 @@ def main() -> int:
 
     for s in rows:
         try:
-            reactions = fetch_message_reactions(s["channel"], s["message_id"], token=token)
+            reactions = fetch_message_reactions(s["channel"], s["message_id"], user_id, token=token)
         except DiscordError as exc:
             errors.append({"suggestion_id": s["id"], "name": s["name"],
                            "message_id": s["message_id"], "error": str(exc)})

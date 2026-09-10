@@ -144,8 +144,9 @@ Guards that are load-bearing:
 - Two ✅ for the same date → reported in `conflicts`, nothing accepted. Ask which.
 - A card whose reactions cannot be read (deleted message, expired token) lands
   in `errors` and the exit code is 1. It is never counted as "no reaction".
-- The bot's own seed reaction must stay at exactly one; never react twice from
-  the bot, or `by_user` breaks.
+- Only `discord.user_id`'s reactions count. The bot's seed and anyone else's
+  ✅ are ignored, so the bot can sit in a shared server. Without a numeric
+  `discord.user_id` the sweep exits 2 and touches nothing.
 
 `--dry-run` reports without moving any suggestion to `accepted` / `declined`.
 

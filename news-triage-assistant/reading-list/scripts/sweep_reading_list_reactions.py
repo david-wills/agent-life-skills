@@ -8,7 +8,9 @@ its reactions and drive Reader accordingly:
     📌  → PATCH /v3/update/<id>/ {"location": "later"}
     🗑️  → DELETE /v3/delete/<id>/
 
-Cards with no reaction stay pending until they age out (14 days). Cards with
+Only reactions by the configured owner (``discord.user_id``) count; the bot's
+own seeds and anyone else's clicks are ignored, so the bot can sit in a shared
+server. Cards with no reaction stay pending until they age out (14 days). Cards with
 two conflicting reactions are left alone and reported: guessing between
 "archive" and "delete" is not a call this script gets to make. A card whose
 reactions cannot be read (deleted message, expired token) is an error, never
@@ -32,7 +34,8 @@ if _LIB is None:
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 import reading_list_common as rl  # noqa: E402
-from discord import DiscordError, fetch_message_reactions, send_message  # noqa: E402
+from discord import DiscordError, fetch_message_reactions, send_message, validate_user_id  # noqa: E402
+from skill_config import ConfigError, cfg  # noqa: E402
 from state_db import connect_db  # noqa: E402
 
 ACTION_LABEL = {
@@ -53,14 +56,16 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def user_actions(channel: str, message_id: str, token: str) -> list[str]:
-    """Distinct actions the user reacted with, de-duplicated and order-stable.
+def user_actions(channel: str, message_id: str, token: str, user_id: str) -> list[str]:
+    """Distinct actions the owner reacted with, de-duplicated and order-stable.
 
-    Raises DiscordError if the message cannot be read; the caller records that
-    against the card rather than treating it as a quiet night.
+    Only reactions by ``user_id`` count; the bot's seeds and anyone else's
+    clicks are ignored. Raises DiscordError if the message cannot be read; the
+    caller records that against the card rather than treating it as a quiet
+    night.
     """
     found: list[str] = []
-    for reaction in fetch_message_reactions(channel, message_id, token=token):
+    for reaction in fetch_message_reactions(channel, message_id, user_id, token=token):
         if not reaction.get("by_user"):
             continue
         action = rl.ACTION_EMOJI.get(rl.strip_vs(reaction.get("name") or ""))
@@ -82,6 +87,14 @@ def apply_action(doc_id: str, action: str, token: str) -> tuple[bool, str]:
 def main() -> int:
     args = parse_args()
     now = rl.utc_now()
+
+    # Whose reactions count. Resolved before anything else so a fresh clone
+    # fails on "configure this" rather than on the first night a card exists.
+    try:
+        user_id = validate_user_id(cfg("discord.user_id"))
+    except (ConfigError, DiscordError) as exc:
+        print(f"not swept: {exc}", file=sys.stderr)
+        return 2
 
     db = Path(args.db).expanduser() if args.db else rl.db_path()
     conn = connect_db(db)
@@ -112,7 +125,7 @@ def main() -> int:
         doc_id = row["doc_id"]
         title = row["title"] or doc_id
         try:
-            actions = user_actions(row["channel"], row["message_id"], discord)
+            actions = user_actions(row["channel"], row["message_id"], discord, user_id)
         except DiscordError as exc:
             errors.append(f"{doc_id}: reaction read failed ({title[:60]}): {exc}")
             continue

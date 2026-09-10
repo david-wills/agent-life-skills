@@ -154,31 +154,86 @@ def send_message(channel_id: str, text: str, token: str | None = None,
     return sent
 
 
-def add_reaction(channel_id: str, message_id: str, emoji: str, token: str | None = None) -> None:
+def _emoji_path(name: str, emoji_id: str | None = None) -> str:
+    """The `{emoji}` segment of a reactions URL: percent-encoded unicode, or `name:id` for custom emoji."""
     from urllib.parse import quote
-    discord_request("PUT", f"/channels/{channel_id}/messages/{message_id}/reactions/{quote(emoji)}/@me",
+    return f"{name}:{emoji_id}" if emoji_id else quote(name, safe="")
+
+
+def add_reaction(channel_id: str, message_id: str, emoji: str, token: str | None = None) -> None:
+    discord_request("PUT", f"/channels/{channel_id}/messages/{message_id}/reactions/{_emoji_path(emoji)}/@me",
                     token=token)
 
 
-def fetch_message_reactions(channel_id: str, message_id: str,
+def validate_user_id(value: Any) -> str:
+    """``discord.user_id`` as a string snowflake. Rejects blanks and placeholders like ``USER_ID``."""
+    text = str(value if value is not None else "").strip()
+    if not text.isdigit():
+        raise DiscordError(
+            "discord.user_id must be your numeric Discord user id (Settings > Advanced > Developer Mode, "
+            f"then right-click your name > Copy User ID); got {text!r}"
+        )
+    return text
+
+
+REACTION_PAGE = 100  # Discord's maximum per page on the reactions endpoint
+
+
+def reaction_user_ids(channel_id: str, message_id: str, name: str, emoji_id: str | None = None,
+                      burst: bool = False, token: str | None = None) -> list[str]:
+    """Ids of every user who reacted with one emoji. Follows pagination.
+
+    ``burst`` selects super reactions, which Discord counts separately.
+    """
+    token = token or get_discord_token()
+    base = f"/channels/{channel_id}/messages/{message_id}/reactions/{_emoji_path(name, emoji_id)}"
+    ids: list[str] = []
+    after: str | None = None
+    while True:
+        query = f"?limit={REACTION_PAGE}&type={1 if burst else 0}" + (f"&after={after}" if after else "")
+        page = discord_request("GET", base + query, token=token)
+        if not isinstance(page, list):
+            raise DiscordError(f"Discord GET {base} returned {type(page).__name__}, expected a user list")
+        page_ids = [str(u.get("id")) for u in page if isinstance(u, dict) and u.get("id")]
+        ids.extend(page_ids)
+        if len(page) < REACTION_PAGE or not page_ids:
+            return ids
+        after = page_ids[-1]
+
+
+def fetch_message_reactions(channel_id: str, message_id: str, user_id: Any,
                             token: str | None = None) -> list[dict[str, Any]]:
     """Return a message's reactions as ``[{name, count, by_user}]``.
+
+    ``by_user`` is True only when ``user_id`` (the configured owner,
+    ``discord.user_id``) is among the users who reacted with that emoji. The
+    message object Discord returns carries only a count and whether the bot
+    itself reacted, so ownership is resolved with a second call per reaction
+    that lists the reacting users. That call is skipped when the count shows
+    nobody but the bot reacted. Other people's reactions never set ``by_user``,
+    so the bot can live in a shared server.
 
     Raises DiscordError if the message cannot be read. Callers must not treat a
     failure as "no reactions": a deleted message or expired token is a problem
     to report, not a quiet day.
-
-    Discord returns ``{emoji:{name}, count, me}`` without a user list. The bot
-    seeds one reaction of its own, so ``by_user`` means the count exceeds the
-    bot's contribution.
     """
+    user_id = validate_user_id(user_id)
+    token = token or get_discord_token()
     msg = discord_request("GET", f"/channels/{channel_id}/messages/{message_id}", token=token)
     out: list[dict[str, Any]] = []
     for r in msg.get("reactions") or []:
-        name = (r.get("emoji") or {}).get("name")
+        emoji = r.get("emoji") or {}
+        name = emoji.get("name")
         if not name:
             continue
         count = int(r.get("count") or 0)
-        by_user = count > (1 if r.get("me") else 0)
+        by_user = False
+        # count is exact, so "1 and it is the bot" means nobody else reacted.
+        if count > (1 if r.get("me") else 0):
+            users = reaction_user_ids(channel_id, message_id, name, emoji.get("id"), token=token)
+            if user_id not in users and int((r.get("count_details") or {}).get("burst") or 0) > 0:
+                users += reaction_user_ids(channel_id, message_id, name, emoji.get("id"),
+                                           burst=True, token=token)
+            by_user = user_id in users
         out.append({"name": name, "count": count, "by_user": by_user})
     return out

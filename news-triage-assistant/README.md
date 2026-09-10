@@ -92,6 +92,11 @@ retrievable is expected. Those are reported separately from genuine failures,
 because a scheduler that pages on the expected case gets muted, and then it does
 not page on the real one either.
 
+**Only the owner's reactions count.** The sweep lists who reacted with each
+emoji and acts only on `discord.user_id`. The bot's own seeds and other members'
+clicks are ignored, so the bot can live in a shared server without a stranger's
+🗑️ deleting your article.
+
 **An unreadable card is an error, not an empty one.** When the sweep cannot read
 a card's reactions, it records that against the card rather than treating it as
 "no reaction". Otherwise an expired bot token would quietly age out every pending
@@ -117,7 +122,7 @@ You need:
   stdlib; a venv is the sane place for it)
 
 ```bash
-cp config.example.json config.json                    # your Discord channel ids
+cp config.example.json config.json                    # your Discord channel ids and user id
 cp morning-news/profile.example.md  morning-news/profile.local.md
 cp morning-news/feeds.example.yaml  morning-news/feeds.local.yaml
 ```
@@ -151,7 +156,7 @@ Start with `--dry-run`; every stage that posts has one.
   non-zero on hard failure, which is all a scheduler needs to alert on.
 - **Discord is assumed, not abstracted.** The reaction contract in `reading-list`
   is built on Discord's per-message reactions; there is no posting interface to
-  swap out.
+  swap out. One owner per deployment: `discord.user_id` is a single id.
 - **Feed runs are not reproducible.** Two fetches seconds apart routinely differ
   by an item, because outlets re-publish the same story under a second URL. A
   one-item delta between runs is not a bug.

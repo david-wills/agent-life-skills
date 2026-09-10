@@ -104,7 +104,8 @@ up.
 - `DISCORD_BOT_TOKEN` in the environment (or in one of the secret stores
   `lib/read_secret.py` reads), for a bot that can post and react in the
   restaurants channel.
-- Config keys: `discord.channels.restaurants`, `discord.channels.errors`,
+- Config keys: `discord.user_id` (whose ✅ counts; the bot's seed and other
+  members' reactions are ignored), `discord.channels.restaurants`, `discord.channels.errors`,
   `user.home` (the drive-time origin, address + lat/lng), `accounts.personal`
   (Maps), `accounts.service` (calendar), `calendars.shared`, and optionally
   `paths.data_root` (default `_data/` at the repo root).

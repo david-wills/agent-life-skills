@@ -27,6 +27,8 @@
   },
 
   "discord": {
+    "_comment": "user_id is the numeric id of the person whose reactions the sweeps act on. In Discord: Settings > Advanced > Developer Mode, then right-click your name > Copy User ID. Reactions from anyone else are ignored, so the bot can live in a shared server.",
+    "user_id": "USER_ID",
     "channels": {
       "_comment": "Numeric channel ids. Each package README says which it needs.",
       "newsfeed": "CHANNEL_ID",
