@@ -1,6 +1,7 @@
 ---
 name: import-readwise-highlights
-description: Import the last day of Readwise highlights into local JSON and markdown, and ingest them into the local full-text index. Use when the user asks to sync, back up, or import recent Readwise highlights, especially a rolling 24-hour window or another `updatedAfter` delta.
+description: Import recent Readwise highlights to JSON and markdown and index them locally. Use to sync, back up or import highlights, by default the last 24 hours.
+compatibility: Requires a Readwise account.
 ---
 
 # Import Readwise Highlights

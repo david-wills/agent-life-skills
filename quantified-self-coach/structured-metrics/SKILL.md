@@ -1,6 +1,6 @@
 ---
 name: structured-metrics
-description: The structured layer over the quantified-self data — populates the metrics_daily, workouts, exercise_sets and sleep_sessions tables plus the metrics_daily_resolved view in index.db from the canonical Apple Health, Oura and Hevy files. Use when adding a metric or source, changing cross-source resolution priority, backfilling the tables, or debugging why the workout coach sees stale or missing numbers.
+description: Build the metrics_daily, workouts, exercise_sets and sleep_sessions tables from Apple Health, Oura and Hevy. Use to add a metric, backfill or debug numbers.
 ---
 
 # Structured metrics

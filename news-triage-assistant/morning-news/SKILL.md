@@ -1,6 +1,7 @@
 ---
 name: morning-news
-description: Daily news digest. A fetcher pulls a list of public RSS feeds, a scheduled agent classifies the last 24 hours against a personal interest profile, and a poster ships one Discord message per theme to #newsfeed with rate-limit backoff and resume. Use when tuning what the digest surfaces (edit the profile), changing feeds, debugging a failed or half-posted run, or adjusting the digest format.
+description: Daily RSS digest that fetches feeds, classifies the last day against an interest profile and posts one Discord message per theme. Use to tune feeds or format.
+compatibility: Requires feedparser, PyYAML and python-dateutil (requirements.txt), a Discord bot, and an agent runtime that runs prompt.md on a schedule.
 ---
 
 # Morning news

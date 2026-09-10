@@ -1,6 +1,8 @@
 ---
 name: restaurant-saver
-description: A restaurant pipeline, backed by one SQLite database. (1) INTAKE — anything dropped in the Discord restaurants channel (`discord.channels.restaurants` in config.json), no @mention needed: a name, a Maps link, an article URL, with or without a note. Resolved against Google Maps, enriched with drive time from home + reservation platform + booking URL, and stored. (2) PLAN — a Wednesday run finds free Thursdays on the shared household calendar and posts 3–5 suggestion cards with a ✅ affordance; an hourly sweep turns ✅ into a `to_book` work list. (3) BRIEF — a day-of run spots a reservation on the calendar and posts what to order. Use when the user drops a restaurant, asks what's on their list, asks about free Thursdays, or when tuning any of the three scheduled runs. Does NOT book — the sweep stops at the intent. Does NOT delete places.
+description: Save restaurants dropped in a Discord channel, suggest free Thursdays with ✅ cards, brief on reservation day. Use to add a place, list places or plan a night.
+compatibility: Requires Google Chrome driven by Playwright (requirements.txt) signed into Google Maps, the gog calendar CLI, and a Discord bot. The default Chrome path is macOS; set CHROME_PATH elsewhere.
+metadata: {"openclaw": {"requires": {"bins": ["gog"]}}}
 ---
 
 # Restaurant pipeline

@@ -1,6 +1,8 @@
 ---
 name: name-videos
-description: Auto-name finished short-form videos from their on-screen title card. Scans the configured drop folder and its CUTDOWNS subfolder for files that still have raw export names (underscores, codec tags, version numbers), reads the title band off the first seconds of video with local OCR, and proposes "PREFIX Title - First Clip" filenames for review before renaming. Use when the user asks to name videos, rename reels, clean up export filenames, or says "/name-videos".
+description: Name finished short-form videos from their title card with local OCR and propose PREFIX Title filenames for review. Use to name, rename or clean up exports.
+compatibility: macOS only, since OCR uses Apple's Vision framework (pyobjc, requirements.txt). Requires ffmpeg on PATH.
+metadata: {"openclaw": {"requires": {"bins": ["ffmpeg"]}, "os": ["darwin"]}}
 ---
 
 # Naming finished reels

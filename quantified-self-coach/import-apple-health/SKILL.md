@@ -1,6 +1,7 @@
 ---
 name: import-apple-health
-description: Receive Apple Health data via Health Auto Export's REST integration, persist it as per-day Markdown plus a JSON sidecar, index it, and detect sync gaps. A stdlib HTTP server the HAE iPhone app POSTs to nightly; a daily gap check that pages you while HealthKit can still re-send. A backfill script re-plays archived exports from any folder.
+description: Receive Apple Health exports from the Health Auto Export app over HTTP, store per-day markdown, and page on sync gaps. Use to set up, backfill or debug sync.
+compatibility: Server and gap check run on any OS; the shipped launchd templates are macOS. Needs the Health Auto Export iPhone app and a Discord bot for gap alerts.
 ---
 
 # Import Apple Health

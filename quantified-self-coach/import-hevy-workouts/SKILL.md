@@ -1,6 +1,7 @@
 ---
 name: import-hevy-workouts
-description: Import workouts from Hevy (the workout logging app) into local JSON, then render each as markdown and index it. Use when the user asks to sync, back up, or import Hevy workout history — full historical pull or incremental delta.
+description: Import Hevy workout history to JSON, render markdown and index it. Use to sync, back up or import workouts, full history or a delta.
+compatibility: Requires a Hevy API key.
 ---
 
 # Import Hevy Workouts

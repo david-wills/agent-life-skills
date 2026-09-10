@@ -1,6 +1,8 @@
 ---
 name: import-reader-archive
-description: Import Readwise Reader documents from the Archive location (the read/triaged pile) into local JSON, and ingest them into the local full-text index. Use when the user asks to back up or sync the Reader archive, backfill it, or pull a delta of newly-archived Reader documents.
+description: Dump Readwise Reader's archive to JSON and ingest it into the local full-text index. Use to back up, backfill or pull a delta of read documents.
+compatibility: Requires a Readwise Reader account. The ingester uses the claude CLI to summarise documents Reader did not.
+metadata: {"openclaw": {"requires": {"bins": ["claude"]}}}
 ---
 
 # Import Readwise Reader Archive

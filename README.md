@@ -27,7 +27,7 @@ how to run it, and its honest limits.
 
 ```
 <package>/<skill>/
-├── SKILL.md          the skill: frontmatter (name, description) + the instructions an agent follows
+├── SKILL.md          the skill: one-line frontmatter + the instructions an agent follows
 ├── scripts/          plain Python the instructions call; stdlib where possible
 ├── *.example.*       any personal input (a feed list, a goals file) ships as an example
 └── requirements.txt  only where the stdlib is not enough (three skills)
@@ -45,6 +45,14 @@ Two runtimes appear in the docs:
   channels to an agent. That is where the author runs the unattended skills.
   Nothing here requires it: every scheduled step is a plain command you can
   run from cron, launchd, or any other scheduler.
+
+Frontmatter is flat and small, since every runtime loads it for every skill at
+startup: a `description` under 160 characters that says what the skill does and
+when to use it, a `compatibility` line where a skill needs an OS, a binary, a
+Python package or an account, and, for the four skills with a hard gate,
+`metadata` holding OpenClaw's `requires.bins` / `os` block as one JSON object.
+Claude Code ignores `metadata`. `tests/test_skill_metadata.py` enforces the
+budget and checks every gate against the requirement table in `doctor.py`.
 
 ## Setup
 

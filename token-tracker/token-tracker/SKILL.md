@@ -1,6 +1,7 @@
 ---
 name: token-tracker
-description: Track Claude token usage, API-equivalent cost, and subscription quota burn per day, per workflow (cron job / Discord channel / terminal session), and per model. Answers "what used up my weekly quota", "what does the newsfeed cron cost", and "where should I switch models". Use when the user asks about token usage, model costs, quota, rate limits, or which workflows are expensive.
+description: Track Claude token usage, API-equivalent cost and quota burn per day, workflow and model. Use for questions about usage, cost, quota or expensive workflows.
+compatibility: Reads Claude Code transcripts under ~/.claude/projects. Quota sampling reads the Claude Code login from the macOS keychain; everything else runs on any OS.
 ---
 
 # Token Tracker

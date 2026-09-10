@@ -1,6 +1,7 @@
 ---
 name: import-oura-data
-description: Import workout, readiness, and sleep data from the Oura Ring v2 API into local JSON, then render it as markdown and index it. Use when the user asks to sync, back up, or import Oura history — full historical pull or incremental delta. Powers recovery-aware suggestions in the workout coach.
+description: Import Oura Ring workouts, readiness and sleep to JSON, render markdown and index it. Use to sync or back up Oura history for the workout coach.
+compatibility: Requires Oura API client credentials.
 ---
 
 # Import Oura Data

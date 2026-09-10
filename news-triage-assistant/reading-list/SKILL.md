@@ -1,6 +1,8 @@
 ---
 name: reading-list
-description: Intermediary stage between the newsfeed digest and actually reading an article. A twice-daily run pulls everything newly saved to the user's Readwise Reader inbox, generates a 3-paragraph summary from the full article text Reader already fetched, and posts one card per article to Discord #reading-list with ✅ / 📌 / 🗑️ reaction affordances. A nightly sweep turns those reactions into real Readwise actions. Use when tuning the summary prompt, changing cadence, debugging a missing or malformed card, or adding a reaction verb.
+description: Summarise new Readwise Reader saves into Discord cards with ✅ 📌 🗑️ reactions; a nightly sweep applies them. Use to tune the summary, cadence or reaction verbs.
+compatibility: Requires the claude CLI for summaries, a Readwise Reader account and a Discord bot.
+metadata: {"openclaw": {"requires": {"bins": ["claude"]}}}
 ---
 
 # Reading List

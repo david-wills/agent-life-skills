@@ -1,6 +1,7 @@
 ---
 name: workout-coach
-description: Personal-trainer assistant. When the user sends a planning intent in the workouts channel (`config.json` → `discord.channels.workouts`) — "what should I do today?", "plan my workout", "gym today", "UB today" — propose today's solo session: warmup + 4-6 exercises (sets × reps × weight) drawn from PROGRAM.md pools, informed by the last 14 days of Hevy history, this morning's Oura recovery, and the user's goals. Then mirror it to the phone as a Hevy routine. Do NOT prescribe cardio, nutrition, or Friday trainer days.
+description: Propose today's lifting session from program pools, recent Hevy history and Oura recovery, then push it to Hevy. Use when the user asks what to train today.
+compatibility: Runs inside an agent runtime bound to a Discord channel. Requires a Hevy API key to mirror the routine to the phone.
 ---
 
 # Workout Coach
