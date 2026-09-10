@@ -264,8 +264,10 @@ def short_project(project):
     # Claude Code names a project dir after its path with '/' -> '-', so the
     # home directory arrives as a prefix like '-Users-you-'. Strip it.
     home = os.path.expanduser("~").replace("/", "-")
-    p = project.replace(home + "-", "", 1).lstrip("-")
-    p = p.replace("-openclaw-workspace", "workspace")
+    p = project.replace(home + "-", "", 1)
+    # The gateway's workspace hides under a dot directory, so it arrives as
+    # '-openclaw-workspace'. Collapse that before trimming the leading dash.
+    p = p.replace("-openclaw-workspace", "workspace").lstrip("-")
     return p.replace("workspace-", "workspace/")
 
 
