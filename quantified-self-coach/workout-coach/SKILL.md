@@ -34,7 +34,7 @@ Read all four before composing a response. `<data_root>` is `paths.data_root` in
    it as the templates; without a filled-in copy of each at the paths above, the coach
    has no vocabulary to plan from.
 3. **`python3 quantified-self-coach/workout-coach/scripts/build_context.py`** — reads `<data_root>/knowledge/index.db` (the structured metrics layer; `SELECT` only). Emits:
-   - Current weekday + recommended slot
+   - Today's date and weekday. The slot is not in the bundle: read it off GOALS.md's Cadence table.
    - Recovery (Oura): readiness/sleep score, HRV (with `hrv_baseline_30d` + `hrv_pct_of_baseline`), RHR, total sleep min, plus a derived `recovery_band` (`green` / `yellow` / `red`) that already applies the gating table below. Pulled from `metrics_daily_resolved` for today (preferred) or yesterday (fallback). Missing → fall through silently.
    - Last 14 days of Hevy sessions (date, weekday, duration, exercises)
    - Per-exercise last working set in the 365-day window (`last_performance`). Each entry includes `days_since_last` to make the within-pattern variety axis a one-line scan.
@@ -93,7 +93,7 @@ Provide **2-3 alternate options per exercise slot** drawn from the same movement
 The 2nd and 3rd alts stay bare strings either way — they don't get mirrored into Hevy and the briefing only shows their names.
 
 ### Recovery gating (Oura readiness)
-The context bundle's `RECOVERY (Oura)` block is the input. Apply it to *intensity*, not to whether to train — the slot decision still comes from the weekday + canonical split. If recovery is missing entirely, fall through silently and plan as usual.
+The context bundle's `RECOVERY (Oura)` block is the input. Apply it to *intensity*, not to whether to train — the slot decision still comes from the weekday and GOALS.md's Cadence table. If recovery is missing entirely, fall through silently and plan as usual.
 
 The bundle pre-computes `recovery_band` (`green` / `yellow` / `red`) using the table below — `band=green` is shown in text mode, present as a JSON field. Trust it as a starting point; you may still escalate further on a conspicuously bad secondary signal not yet baked in.
 

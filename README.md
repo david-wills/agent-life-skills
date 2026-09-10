@@ -167,6 +167,24 @@ Stdlib `unittest`, no network: Discord is replaced by an in-memory fake in
 no config. pytest runs the same files if you prefer it. GitHub Actions runs
 the suite on Ubuntu and macOS (`.github/workflows/ci.yml`).
 
+## Evidence
+
+One sanitized artifact per package, produced by the real scripts on fixture or
+public data, and the operational history that was stripped out of the
+`SKILL.md` files to keep them short:
+
+| Package | Example output | Field notes |
+| --- | --- | --- |
+| news-triage-assistant | [a morning digest](news-triage-assistant/docs/examples/morning-digest.md) | [field notes](news-triage-assistant/docs/field-notes.md) |
+| quantified-self-coach | [a coaching brief](quantified-self-coach/docs/examples/coaching-brief.md) | [field notes](quantified-self-coach/docs/field-notes.md) |
+| restaurant-assistant | [three Thursday cards](restaurant-assistant/docs/examples/thursday-cards.md) | [field notes](restaurant-assistant/docs/field-notes.md) |
+| token-tracker | [a token report](token-tracker/docs/examples/token-report.md) | [field notes](token-tracker/docs/field-notes.md) |
+| video-tools | [probe, plan, rename](video-tools/docs/examples/ocr-probe.md) | [field notes](video-tools/docs/field-notes.md) |
+
+[`docs/compatibility.md`](docs/compatibility.md) is the matrix: OS, accounts,
+binaries, what each skill writes outside the data root, and which steps have a
+dry run.
+
 ## What is deliberately not here
 
 The work-side skills (meeting synthesis, email ingest, Slack triage, a work

@@ -9,7 +9,8 @@ Reads the structured metrics layer in `<data_root>/knowledge/index.db`
   - recovery (Oura) → `metrics_daily_resolved` view + 30-day HRV baseline
 
 Emits:
-  1. Today's weekday + recommended slot (Mon=UB / Tue-Wed=LB canonical split).
+  1. Today's date and weekday. The slot comes from GOALS.md's Cadence table,
+     which the coach reads; this bundle holds no cadence of its own.
   2. Recovery (Oura): readiness, sleep score, HRV (with % of 30-day baseline),
      RHR, total sleep min, plus a derived `recovery_band` (green/yellow/red)
      applying the SKILL.md recovery-gating table.
@@ -55,23 +56,6 @@ def load_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
-
-
-def recommended_slot(weekday: str) -> tuple[str, str]:
-    if weekday == "Monday":
-        return ("Upper body (solo, logged in Hevy)",
-                "Mon is the canonical UB slot.")
-    if weekday in ("Tuesday", "Wednesday"):
-        return ("Lower body (solo, logged in Hevy)",
-                f"{weekday} is the canonical LB slot.")
-    if weekday == "Friday":
-        return ("Trainer day (full body, not logged in Hevy)",
-                "Agent should not prescribe — trainer is driving.")
-    if weekday == "Thursday":
-        return ("Flex / make-up day",
-                "Not part of canonical split. Pick whichever of UB/LB hasn't been hit in 4+ days.")
-    return ("Rest / optional make-up",
-            f"{weekday} is not a canonical training day. Only lift if UB or LB is 4+ days stale.")
 
 
 def _resolved_metric(conn: sqlite3.Connection, metric: str, on_date: str) -> float | None:
@@ -232,12 +216,9 @@ def load_last_performance(conn: sqlite3.Connection, today: date, lookback_days: 
 def build_context(today: date, db_path: Path, lookback_sessions: int, lookback_perf: int) -> dict:
     conn = load_db(db_path)
     weekday = today.strftime("%A")
-    slot, slot_reason = recommended_slot(weekday)
     return {
         "today": today.isoformat(),
         "weekday": weekday,
-        "recommended_slot": slot,
-        "slot_rationale": slot_reason,
         "lookback_sessions_days": lookback_sessions,
         "lookback_perf_days": lookback_perf,
         "sessions": load_sessions(conn, today, lookback_sessions),
@@ -250,8 +231,7 @@ def render_text(ctx: dict) -> str:
     out: list[str] = []
     out.append("=== WORKOUT COACH CONTEXT ===")
     out.append(f"Today: {ctx['weekday']} {ctx['today']}")
-    out.append(f"Recommended slot: {ctx['recommended_slot']}")
-    out.append(f"  ({ctx['slot_rationale']})")
+    out.append("Slot: from the Cadence table in GOALS.md (this bundle holds no cadence)")
     out.append("")
 
     r = ctx.get("readiness")

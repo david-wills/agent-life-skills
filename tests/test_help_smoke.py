@@ -31,6 +31,7 @@ class HelpSmoke(unittest.TestCase):
     def test_every_script_prints_help_without_config(self):
         found = scripts()
         self.assertGreater(len(found), 20, "script discovery walked the wrong tree")
+        data_existed = (REPO / "_data").exists()  # a prior tour or smoke run may have made it
         failures = []
         with tempfile.TemporaryDirectory() as home:
             env = {"PATH": os.environ.get("PATH", ""), "HOME": home}
@@ -43,7 +44,8 @@ class HelpSmoke(unittest.TestCase):
                 if r.returncode != 0:
                     failures.append(f"{os.path.relpath(path, REPO)}: exit {r.returncode}\n{r.stderr[-400:]}")
         self.assertEqual(failures, [], "\n\n".join(failures))
-        self.assertFalse((REPO / "_data").exists(), "--help created _data/ in the repo")
+        if not data_existed:
+            self.assertFalse((REPO / "_data").exists(), "--help created _data/ in the repo")
 
 
 if __name__ == "__main__":
