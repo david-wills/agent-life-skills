@@ -74,7 +74,9 @@ python3 -m unittest discover -s tests
 ```
 
 Stdlib `unittest`, no network: Discord is replaced by an in-memory fake in
-`tests/support.py`. pytest runs the same files if you prefer it.
+`tests/support.py`, and every script's `--help` is run in an empty home with
+no config. pytest runs the same files if you prefer it. GitHub Actions runs
+the suite on Ubuntu and macOS (`.github/workflows/ci.yml`).
 
 ## What is deliberately not here
 

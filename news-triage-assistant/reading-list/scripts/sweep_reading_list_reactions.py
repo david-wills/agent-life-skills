@@ -201,6 +201,7 @@ def main() -> int:
         "errors": errors,
         "dry_run": bool(args.dry_run),
     }
+    conn.close()
     print(json.dumps(result))
     return 1 if errors and total == 0 else 0
 

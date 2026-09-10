@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import restaurant_common as rc  # noqa: E402
 from browser import maps_context  # noqa: E402
 
-DURATION_RE = re.compile(r"\b(\d+)\s*hr\s*(\d+)?\s*min\b|\b(\d+)\s*min\b", re.I)
+# "1 hr 5 min", "2 hr" (a round hour prints no minutes), "25 min".
+DURATION_RE = re.compile(r"\b(\d+)\s*hr(?:\s*(\d+)\s*min)?\b|\b(\d+)\s*min\b", re.I)
 
 # Maps renders price as either a tier ("$", "$$" ... "$$$$") or a per-person
 # range ("$20–30", "$30-50", "$100+"). Match either, as a whole token.
